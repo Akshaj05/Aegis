@@ -1,0 +1,4 @@
+Seeded notes file under the simulated environment's default home
+directory (matches TerminalSession::new's HOME=/home/user, §17.3).
+
+This is ordinary simulated content, not SafeShell configuration.

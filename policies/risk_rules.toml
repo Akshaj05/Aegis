@@ -1,0 +1,13 @@
+# Risk classification rules — may only ever produce RequireApproval, never
+# Deny (docs/architecture.md §20.4).
+#
+# NOT YET AUTHORED — same reasoning as containment_rules.toml: this is
+# Build order phase 4 design work. The starting point when that phase
+# begins is the rule table already specified in docs/architecture.md §20.4:
+# recursive deletion, recursive permission/ownership change, overwrite via
+# `>`, clobbering `mv`, operations on environment-critical paths, mock
+# service stop/kill, mock package removal, partially-supported commands
+# with known divergence, and scope escalation from the post-simulation diff
+# (§20.5 — file/directory/byte/permission-change thresholds).
+
+schema_version = "1.0"

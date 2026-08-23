@@ -1,0 +1,9 @@
+NAME="SafeShell Simulated Environment"
+PRETTY_NAME="SafeShell Simulated Environment"
+ID=safeshell-sim
+
+# This file describes the *simulated filesystem's* seeded content, not a
+# real Linux distribution. SafeShell is not a general-purpose OS sandbox
+# and does not claim to emulate one (docs/security_claims.md) — this file
+# exists only so `cat /etc/os-release` returns something plausible during
+# a session, matching what a real shell's users would expect to find.

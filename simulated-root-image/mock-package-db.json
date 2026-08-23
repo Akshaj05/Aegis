@@ -1,0 +1,9 @@
+{
+  "_comment": "Seed data for the simulated environment's mock package database (docs/architecture.md §40's repository structure). Backs the policy testing table's 'mock package removal breaking the simulated toolchain' scenario (docs/CLAUDE.md's must-not-be-denied corpus, tests/policy_engine_tests) — an 'essential: true' package is exactly the kind of operation that must be RequireApproval, never Deny (DANGEROUS != DENIED, invariant #1). No handler reads this file yet (no package-manager command is implemented in handlers/mod.rs); it is real, well-formed reference data, not wired to anything yet — a disclosed gap, not a silent one.",
+  "schema_version": "1.0",
+  "packages": [
+    { "name": "safeshell-toolchain", "version": "1.0.0", "essential": true },
+    { "name": "curl", "version": "8.4.0", "essential": false },
+    { "name": "git", "version": "2.42.0", "essential": false }
+  ]
+}

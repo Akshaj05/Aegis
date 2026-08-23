@@ -1,0 +1,26 @@
+{
+  "name": "safeshell-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "description": "SafeShell Tauri frontend: terminal, approval/DENY panels, live pipeline visualization. See docs/architecture.md §31.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.3.0",
+    "@tauri-apps/cli": "^2.11.4",
+    "@tsconfig/svelte": "^5.0.8",
+    "svelte": "^5.56.10",
+    "svelte-check": "^4.7.6",
+    "typescript": "^6.0.3",
+    "vite": "^8.2.2"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "@xterm/xterm": "^5.5.0"
+  }
+}

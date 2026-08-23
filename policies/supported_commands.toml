@@ -1,0 +1,68 @@
+# Command support-tier assignments. See docs/architecture.md §19.
+#
+# Every command name SafeShell might see resolves into exactly one tier:
+# supported | partially_supported | unsupported | denied. This file is the
+# source of truth the Policy Engine loads at startup (Build order phase 4);
+# it must self-validate before any command executes (docs/architecture.md
+# §28, "Policy engine failure").
+#
+# `denied` here means "this command name always names a containment-boundary
+# operation" (e.g. invoking a general-purpose shell) — distinct from a
+# per-invocation DENY computed by the containment rules in
+# containment_rules.toml for an otherwise-supported command used in a
+# boundary-violating way (e.g. `rm` targeting a host path). Tier resolution
+# happens before that finer-grained check (§20.1).
+
+schema_version = "1.0"
+
+# NOTE on find/grep: docs/architecture.md §19.2 lists `grep, find` in its
+# SUPPORTED row *and* separately lists `find (subset of predicates), grep
+# (subset of flags)` in its PARTIALLY SUPPORTED row — a real contradiction
+# in the architecture doc itself (a command can only resolve to one tier;
+# the Policy Engine's own self-validation refuses to load a file that puts
+# the same name in two tiers, and rightly so). Resolved here in favor of
+# the more specific classification: the qualifying parentheticals ("subset
+# of predicates"/"subset of flags") are exactly PARTIALLY_SUPPORTED's
+# definition (§19.1: "covers a subset of real-world semantics or flags"),
+# so find/grep live in `tiers.partially_supported` only, not here too.
+
+[tiers.supported]
+# Native Rust handlers implementing documented semantics for the documented
+# flag set; the same handler is used for both simulation and execution.
+commands = [
+  "ls", "cd", "pwd", "mkdir", "rmdir", "touch", "rm", "cp", "mv", "cat",
+  "echo", "chmod", "chown", "ln", "head", "tail", "wc",
+  "mkfifo", "export", "env", "which", "history",
+]
+
+[tiers.partially_supported]
+# A handler exists but covers a subset of real-world semantics/flags, or
+# produces mock rather than real effects. Divergences must be documented
+# per command and disclosed in the UI (§19.1) — not silently presented as
+# complete.
+commands = ["ps", "kill", "safeshell-pkg", "find", "grep"]
+
+[tiers.partially_supported.divergences]
+ps = "Reports only sandbox-local PIDs (sandbox PID namespace), never host processes."
+kill = "Can only signal sandbox-local PIDs; a host-process target is a DENY, not a partial-support case."
+safeshell-pkg = "Operates against local metadata fixtures only; no network installation."
+find = "Supports a subset of real find's predicates."
+grep = "Supports a subset of real grep's flags."
+
+[tiers.unsupported]
+# Recognized as a real command but not implemented. Rejected at policy time
+# as "not implemented in SafeShell", never as a security DENY (§19.1).
+# This list is illustrative, not exhaustive — any command name not present
+# in `tiers.supported` or `tiers.partially_supported` and not matched by
+# `tiers.denied` resolves to unsupported by default.
+commands = [
+  "awk", "sed", "tar", "curl", "wget", "ssh", "systemctl", "apt", "dnf",
+  "docker", "make", "git",
+]
+
+[tiers.denied]
+# Command names whose effect is defined outside the sandbox by definition —
+# not user-overridable (§19.2, §20.3). Distinct from a supported command
+# denied for a specific boundary-violating invocation.
+commands = ["sh", "bash", "zsh", "dash", "ksh"]
+reason_code = "DENY_SHELL_INVOCATION"

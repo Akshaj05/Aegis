@@ -1,0 +1,31 @@
+# Containment-boundary rules — the only source of Deny. See
+# docs/architecture.md §20.3, §4.2, and docs/CLAUDE.md invariant #2.
+#
+# NOT YET AUTHORED. This is genuine Policy Engine design work scoped to
+# Build order phase 4 (docs/CLAUDE.md), not data transcription — writing
+# real rules here now, before the ReasonCode enum, the ParsedCommand AST's
+# final shape, and the sandbox capability report exist in Rust, would mean
+# guessing at a schema this file's own consumer hasn't been designed yet.
+#
+# The reason codes this file's rules must ultimately produce (exhaustive
+# for the MVU, per §20.3 — adding a new one is an architectural change, not
+# a routine rule addition):
+#   DENY_HOST_PATH_ACCESS
+#   DENY_SANDBOX_ESCAPE_ATTEMPT
+#   DENY_HOST_PROCESS_MANIPULATION
+#   DENY_SANDBOX_WEAKENING
+#   DENY_REQUIRES_HOST_PRIVILEGE
+#   DENY_UNSIMULATABLE
+#   DENY_NO_RECOVERY_GUARANTEE
+#   DENY_CAPABILITY_UNAVAILABLE
+#   DENY_SHELL_INVOCATION
+#
+# Required test posture once populated (docs/CLAUDE.md "Testing" table,
+# tests/policy_engine_tests/): every rule here must be exercised by both the
+# "must always be denied" boundary corpus AND cross-checked against the
+# "must not be denied" corpus (rm -rf /project, rm -rf / on the simulated
+# root, chmod -R 777 /, chown -R across the tree, mock package removal) to
+# guarantee no rule here accidentally fires on a supported, containable
+# operation.
+
+schema_version = "1.0"

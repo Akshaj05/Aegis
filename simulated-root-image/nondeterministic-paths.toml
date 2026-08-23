@@ -1,0 +1,27 @@
+# Declared nondeterminism allowlist for the simulated base image (§26.3).
+#
+# `verification::tolerance::NondeterminismAllowlist` loads this file.
+# Paths listed here are exempt from the "content hash differs" mismatch
+# check (§26.2) — everything else about them (whether they were created,
+# modified, or deleted at all) is still compared normally; only the exact
+# byte content is tolerated as time-dependent.
+#
+# Paths are relative to the simulated sandbox root, matching the relative
+# paths `simulation::diff::SimulationDiff` reports.
+#
+# Build order phase 13 ("seed environment") populated the base image
+# with real content (etc/, home/, project/, var/log/) and wired
+# `orchestrator::AppState` to actually load *this* file at startup and
+# use it in every session's verification pass (`orchestrator::run_to_completion`
+# — previously always called with `NondeterminismAllowlist::empty()`, a
+# disclosed gap that phase closed for real). `paths` is still empty
+# because it should be: no handler in this codebase currently produces
+# genuinely time-varying output (`handlers/mod.rs` implements pwd, cd,
+# mkdir, touch, ls, cat, echo — all deterministic given their inputs), so
+# there is no path today whose content legitimately differs between
+# simulation and execution. Declaring one anyway just to have an entry
+# would be exactly the "asserted rather than measured" claim
+# docs/CLAUDE.md warns against. Add an entry here the day a handler (a
+# mock service log, a `date`-stamped file, ...) actually produces one.
+schema_version = "1"
+paths = []

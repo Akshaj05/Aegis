@@ -1,0 +1,98 @@
+# ================================
+# Aegis Project - Git Ignore
+# ================================
+
+# ---------- Claude / Architecture ----------
+CLAUDE.md
+architecture.md
+architecture-diagram.md
+docs/architecture/
+.claude/
+
+# ---------- Environment / Secrets ----------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# ---------- OS ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- IDE ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---------- Logs ----------
+*.log
+logs/
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# ---------- Node / JavaScript ----------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.next/
+dist/
+build/
+coverage/
+
+# ---------- Rust ----------
+target/
+
+# ---------- Local Databases ----------
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+
+# ---------- Temporary ----------
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+
+# ---------- AI / ML Models ----------
+models/
+*.gguf
+*.safetensors
+*.pt
+*.pth
+*.onnx
+
+# ---------- Build Artifacts ----------
+bin/
+obj/
+out/
+release/
+
+# ---------- Archives ----------
+*.zip
+*.tar
+*.tar.gz
+*.7z

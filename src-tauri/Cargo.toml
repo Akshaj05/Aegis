@@ -1,0 +1,64 @@
+[package]
+name = "safeshell"
+version = "0.1.0"
+edition = "2021"
+description = "SafeShell: transactional, simulated-then-executed shell command pipeline"
+license = "UNLICENSED"
+publish = false
+
+[lib]
+name = "safeshell"
+path = "src/lib.rs"
+
+[[bin]]
+name = "safeshell"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+ulid = "1"
+nix = { version = "0.31", features = ["fs", "sched", "mount", "process", "user", "signal"] }
+libc = "0.2"
+seccompiler = "0.5"
+landlock = "0.4"
+toml = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+# Build order phase 9 (`ai/`): a synchronous HTTP client rather than an
+# async stack (`tokio` + async `reqwest`), and no `jsonschema` crate.
+# Deliberate deviations from this file's own earlier forward-looking
+# comment, both for the same reason — nothing else in this crate is
+# async (every pipeline stage, including `executor::execute` and
+# `simulation::manager::simulate`, is a plain synchronous call), so a
+# blocking client with a real timeout (`ureq`'s `timeout_global`) fits
+# the rest of the codebase without introducing async coloring through
+# `transaction::manager`. And `ai::schema`'s enums already reject any
+# value outside their closed taxonomy via plain `serde` derive (an
+# unrecognized `intent`/`risk_level`/`recovery_recommendation.strategy`
+# string fails the whole parse) — the same self-validating-loader
+# posture `policy::support_tiers::SupportTierTable` already established,
+# not something a JSON Schema library adds more correctness to. See
+# `ai::backend`'s and `ai::validation`'s module docs.
+ureq = { version = "3.4.0", features = ["json"] }
+
+# Build order phase 10 (`ipc/`, `main.rs`): the desktop shell. This dev
+# environment's earlier gap — no system webview dev packages
+# (`libwebkit2gtk-4.1-dev` and friends) — is closed as of this phase (see
+# `orchestrator/mod.rs`'s module doc for what `ipc/` delegates into), so
+# `tauri` is now a plain required dependency rather than deferred behind
+# an optional "gui" feature: this is a single-binary desktop application:
+# `main.rs` *is* the app, not a lib-only crate with an app bolted on
+# later. A machine that genuinely can't build the webview bindings can
+# still run `cargo test --lib`/`cargo check --lib` against everything in
+# `src/` other than `main.rs`/`ipc/`'s Tauri command wiring.
+tauri = { version = "2", features = [] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dev-dependencies]
+tempfile = "3"

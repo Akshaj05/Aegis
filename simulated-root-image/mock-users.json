@@ -1,0 +1,13 @@
+{
+  "_comment": "Seed data for the simulated environment's mock user database (docs/architecture.md §40's repository structure). Sibling to the base image's directory content (etc/, home/, ...), never copied into a session's simulated root itself — see orchestrator::seed_base_from_image's doc comment for that rule. No handler in this codebase reads this file yet (handlers/mod.rs implements pwd, cd, mkdir, touch, ls, cat, echo only); it is real, well-formed reference data ready for whichever future user/permission-related handler needs it, not wired to anything yet — a disclosed gap, not a silent one.",
+  "schema_version": "1.0",
+  "users": [
+    {
+      "username": "user",
+      "uid": 1000,
+      "gid": 1000,
+      "home": "/home/user",
+      "shell": "/bin/safeshell"
+    }
+  ]
+}
