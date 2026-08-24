@@ -186,6 +186,58 @@ impl LayeredResolver {
         result
     }
 
+    /// `write_file`: creates or overwrites `rel_path` in the top layer with
+    /// exactly `contents`, regardless of what (if anything) exists at that
+    /// path in a lower layer — the top layer always wins on a write, same
+    /// as `touch`/`mkdir`. Used by redirection (`>`/`>>`) and by `cp`/`mv`,
+    /// which read a source's bytes via [`read_file`](Self::read_file) and
+    /// hand them here rather than needing a new cross-layer "copy"
+    /// primitive of their own.
+    pub fn write_file(&self, rel_path: &str, contents: &[u8]) -> io::Result<()> {
+        let (parent, name) = rel_path.rsplit_once('/').unwrap_or(("", rel_path));
+        self.ensure_top_dir_chain(parent)?;
+        let result = self.top().write_new_file(rel_path, contents);
+        if result.is_ok() {
+            self.clear_stale_whiteout(parent, name);
+        }
+        result
+    }
+
+    /// `chmod`/`chown`: like `write_file`, these are mutations that must
+    /// land for real in the top layer for the change to be visible (a
+    /// lower layer is sealed/read-only checkpoint content) — but unlike
+    /// `write_file`, there's no content to copy up: if `<name>` doesn't
+    /// already have a real copy in the top layer, `touch`'s own copy-up
+    /// (content-preserving) is reused first so the mode/owner change
+    /// applies to a full copy of the file, not an empty shell that would
+    /// silently lose the lower layer's content.
+    fn ensure_top_copy(&self, rel_path: &str) -> io::Result<()> {
+        if self.top().stat(rel_path).is_ok() {
+            return Ok(());
+        }
+        match self.stat(rel_path) {
+            Ok(info) if info.kind == FileKind::Directory => {
+                let (parent, name) = rel_path.rsplit_once('/').unwrap_or(("", rel_path));
+                self.ensure_top_dir_chain(parent)?;
+                self.top().mkdir(parent, name)
+            }
+            Ok(_) => self.touch(rel_path),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn chmod(&self, rel_path: &str, mode: u32) -> io::Result<()> {
+        self.ensure_top_copy(rel_path)?;
+        let (parent, name) = rel_path.rsplit_once('/').unwrap_or(("", rel_path));
+        self.top().set_mode(parent, name, mode)
+    }
+
+    pub fn chown(&self, rel_path: &str, uid: Option<u32>, gid: Option<u32>) -> io::Result<()> {
+        self.ensure_top_copy(rel_path)?;
+        let (parent, name) = rel_path.rsplit_once('/').unwrap_or(("", rel_path));
+        self.top().set_owner(parent, name, uid, gid)
+    }
+
     /// `rm`: removes `<name>` under `parent_rel`. `recursive` gates
     /// directories only (matching real `rm`'s `-r`/`rmdir` split) — a
     /// file is always removable regardless of the flag. Physically

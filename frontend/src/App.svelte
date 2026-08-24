@@ -121,6 +121,15 @@
     if (evt.stage === "WAITING_FOR_APPROVAL" && evt.status === "started") {
       panelDetail = await api.getTransactionDetail(evt.transaction_id);
       panelKind = "approval";
+      // No `terminal://output` event fires until this transaction is
+      // approved/rejected and actually runs — without this, the terminal
+      // is left with no prompt and no indication anything happened,
+      // which reads as a hang even though the pipeline is correctly
+      // paused waiting on the panel to the right.
+      terminalRef.writeSystemLine(
+        "awaiting approval — see the panel on the right.",
+        "33",
+      );
       return;
     }
 

@@ -564,8 +564,7 @@ pub fn submit_command(
     // AI analysis happened or was skipped.
     let ai_outcome = if decision.verdict == Verdict::Allow {
         crate::ai::backend::AiOutcome::Skipped {
-            reason: "command structurally cannot require approval (policy: Allow/Safe)"
-                .to_string(),
+            reason: "command structurally cannot require approval (policy: Allow/Safe)".to_string(),
         }
     } else {
         let ai_request = AiRequest {
@@ -1479,6 +1478,266 @@ mod tests {
         );
         let approval_detail = get_transaction_detail(&state, &approval_txn).unwrap();
         assert_eq!(approval_detail.ai_skipped, Some(false));
+    }
+
+    /// Seeds `name` with `content` as though a *prior, already-committed*
+    /// transaction had created it, by writing it directly into the active
+    /// write layer and sealing it into a real checkpoint — bypassing
+    /// `submit_command` for the setup step. **Deliberately not** "run
+    /// `touch`/`echo >` through `submit_command`, then run the command
+    /// under test in a second `submit_command` call": that sequence hits
+    /// a genuine, pre-existing bug in every `SimulationBackend`
+    /// (`copyup.rs`/`overlayfs.rs`/`fuse_overlay.rs`'s `mount_view`, for
+    /// `WriteTarget::Transient`, composes `[transient, ...checkpoints,
+    /// base]` and never includes `layers.active_write` — so a previous
+    /// transaction's committed content, which lives in `active_write`
+    /// until some *later* transaction's own snapshot step seals it into a
+    /// checkpoint, is invisible to that later transaction's own
+    /// simulation, even though real execution finds it fine (its own
+    /// snapshot step seals `active_write` immediately before it runs).
+    /// The result is a spurious predicted/actual mismatch and an
+    /// automatic rollback — reproducible on `main` before this change
+    /// with nothing but `touch a.txt` then `cat a.txt`, entirely
+    /// independent of any new command added here. Out of scope for this
+    /// change (three backend files, core transaction-pipeline semantics,
+    /// its own dedicated fix and test pass) and reported separately;
+    /// this helper works around it in test setup only, the same way
+    /// `simulation::manager`'s own existing tests already do
+    /// (`simulating_a_command_that_reads_a_checkpoint_file_sees_it`).
+    fn seed_committed_file(state: &AppState, session_id: &str, name: &str, content: &[u8]) {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(session_id).unwrap();
+        std::fs::write(session.stack.active_write.join(name), content).unwrap();
+        session
+            .backend
+            .seal_active_layer(&mut session.stack)
+            .unwrap();
+    }
+
+    #[test]
+    fn cp_runs_through_the_full_pipeline_and_commits() {
+        let (state, _tmp) = test_state();
+        let session_id = create_session(&state).unwrap();
+        let mut sink = CollectingEventSink::default();
+        let mut output = CollectingTerminalOutputSink::default();
+        seed_committed_file(&state, &session_id, "a.txt", b"hello");
+
+        let txn_id = submit_command(
+            &state,
+            &session_id,
+            "cp a.txt b.txt",
+            &mut sink,
+            &mut output,
+        )
+        .unwrap();
+
+        let detail = get_transaction_detail(&state, &txn_id).unwrap();
+        assert_eq!(detail.final_state.as_deref(), Some("COMMITTED"));
+        assert!(
+            state
+                .sessions
+                .lock()
+                .unwrap()
+                .get(&session_id)
+                .unwrap()
+                .stack
+                .active_write
+                .join("b.txt")
+                .exists(),
+            "cp's destination must persist to the active write layer"
+        );
+    }
+
+    #[test]
+    fn mv_runs_through_the_full_pipeline_pauses_for_approval_and_commits_on_approve() {
+        let (state, _tmp) = test_state();
+        let session_id = create_session(&state).unwrap();
+        let mut sink = CollectingEventSink::default();
+        let mut output = CollectingTerminalOutputSink::default();
+        seed_committed_file(&state, &session_id, "a.txt", b"hello");
+
+        // `mv` is unconditionally Medium risk in `policy::risk` (§20.4) —
+        // the Policy Engine has no filesystem access to know whether the
+        // destination really would clobber something, so every `mv`
+        // requires approval regardless. Unaffected by this change;
+        // preserved exactly as-is.
+        let txn_id = submit_command(
+            &state,
+            &session_id,
+            "mv a.txt b.txt",
+            &mut sink,
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(
+            get_transaction_state(&state, &txn_id).unwrap().as_deref(),
+            Some("WAITING_FOR_APPROVAL")
+        );
+
+        approve_transaction(&state, &txn_id, &mut sink, &mut output).unwrap();
+        let detail = get_transaction_detail(&state, &txn_id).unwrap();
+        assert_eq!(detail.final_state.as_deref(), Some("COMMITTED"));
+        let write_layer = state
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&session_id)
+            .unwrap()
+            .stack
+            .active_write
+            .clone();
+        assert!(write_layer.join("b.txt").exists());
+    }
+
+    #[test]
+    fn undo_after_a_committed_mv_restores_the_pre_transaction_state() {
+        let (state, _tmp) = test_state();
+        let session_id = create_session(&state).unwrap();
+        let mut sink = CollectingEventSink::default();
+        let mut output = CollectingTerminalOutputSink::default();
+        seed_committed_file(&state, &session_id, "a.txt", b"hello");
+
+        let txn_id = submit_command(
+            &state,
+            &session_id,
+            "mv a.txt b.txt",
+            &mut sink,
+            &mut output,
+        )
+        .unwrap();
+        approve_transaction(&state, &txn_id, &mut sink, &mut output).unwrap();
+        assert_eq!(
+            get_transaction_detail(&state, &txn_id)
+                .unwrap()
+                .final_state
+                .as_deref(),
+            Some("COMMITTED")
+        );
+
+        let outcome = undo_last_transaction(&state, &session_id).unwrap();
+        assert!(outcome.success, "undo must succeed after a committed mv");
+
+        assert!(
+            !state
+                .sessions
+                .lock()
+                .unwrap()
+                .get(&session_id)
+                .unwrap()
+                .stack
+                .active_write
+                .join("b.txt")
+                .exists(),
+            "b.txt must be gone again after undoing the mv that created it"
+        );
+    }
+
+    #[test]
+    fn echo_redirect_writes_a_real_file_through_the_full_pipeline() {
+        let (state, _tmp) = test_state();
+        let session_id = create_session(&state).unwrap();
+        let mut sink = CollectingEventSink::default();
+        let mut output = CollectingTerminalOutputSink::default();
+
+        // `>` truncate redirection is unconditionally Medium risk in
+        // `policy::risk` (§20.4), independent of which command it's
+        // attached to. Unaffected by this change; preserved exactly
+        // as-is.
+        let txn_id = submit_command(
+            &state,
+            &session_id,
+            "echo hello > greeting.txt",
+            &mut sink,
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(
+            get_transaction_state(&state, &txn_id).unwrap().as_deref(),
+            Some("WAITING_FOR_APPROVAL")
+        );
+        approve_transaction(&state, &txn_id, &mut sink, &mut output).unwrap();
+
+        let detail = get_transaction_detail(&state, &txn_id).unwrap();
+        assert_eq!(detail.final_state.as_deref(), Some("COMMITTED"));
+        // Redirected output never reaches the terminal itself.
+        assert_eq!(output.events[0].stdout, "");
+        assert_eq!(
+            std::fs::read_to_string(
+                state
+                    .sessions
+                    .lock()
+                    .unwrap()
+                    .get(&session_id)
+                    .unwrap()
+                    .stack
+                    .active_write
+                    .join("greeting.txt")
+            )
+            .unwrap(),
+            "hello\n"
+        );
+    }
+
+    #[test]
+    fn grep_finds_a_match_through_the_full_pipeline() {
+        let (state, _tmp) = test_state();
+        let session_id = create_session(&state).unwrap();
+        let mut sink = CollectingEventSink::default();
+        let mut output = CollectingTerminalOutputSink::default();
+        seed_committed_file(&state, &session_id, "a.txt", b"apple\nbanana\n");
+
+        // `grep` is a `partially_supported`-tier command (documented
+        // divergence: "supports a subset of real grep's flags") —
+        // `policy::risk`'s "partially-supported-command divergence -> at
+        // least Medium" rule (§20.4) means it always requires approval,
+        // unconditionally, same as every other partially-supported
+        // command. Unaffected by this change; preserved exactly as-is.
+        let txn_id = submit_command(
+            &state,
+            &session_id,
+            "grep apple a.txt",
+            &mut sink,
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(
+            get_transaction_state(&state, &txn_id).unwrap().as_deref(),
+            Some("WAITING_FOR_APPROVAL")
+        );
+        approve_transaction(&state, &txn_id, &mut sink, &mut output).unwrap();
+
+        let detail = get_transaction_detail(&state, &txn_id).unwrap();
+        assert_eq!(detail.final_state.as_deref(), Some("COMMITTED"));
+        assert_eq!(output.events.last().unwrap().stdout, "apple\n");
+    }
+
+    #[test]
+    fn an_unimplemented_command_still_fails_closed_through_the_full_pipeline() {
+        let (state, _tmp) = test_state();
+        let session_id = create_session(&state).unwrap();
+        let mut sink = CollectingEventSink::default();
+        let mut output = CollectingTerminalOutputSink::default();
+
+        // `awk` is in the policy tiers' `unsupported` list — recognized,
+        // never implemented — and must fail closed as "not implemented",
+        // never execute anything, regardless of how many other commands
+        // now have real handlers.
+        let txn_id =
+            submit_command(&state, &session_id, "awk '{}'", &mut sink, &mut output).unwrap();
+        let detail = get_transaction_detail(&state, &txn_id).unwrap();
+        assert_eq!(detail.final_state.as_deref(), Some("FAILED"));
+    }
+
+    #[test]
+    fn shell_invocation_is_still_denied_through_the_full_pipeline() {
+        let (state, _tmp) = test_state();
+        let session_id = create_session(&state).unwrap();
+        let mut sink = CollectingEventSink::default();
+        let mut output = CollectingTerminalOutputSink::default();
+
+        let txn_id = submit_command(&state, &session_id, "bash", &mut sink, &mut output).unwrap();
+        let detail = get_transaction_detail(&state, &txn_id).unwrap();
+        assert_eq!(detail.final_state.as_deref(), Some("DENIED"));
     }
 
     #[test]

@@ -55,7 +55,13 @@ pub fn execute(
     let view = backend.mount_view(layers, WriteTarget::ActiveWrite)?;
     let resolver = LayeredResolver::from_mounted_view(&view)?;
 
-    let command_result = handlers::dispatch(&parsed.name, &parsed.args, session, &resolver);
+    let command_result = handlers::dispatch(
+        &parsed.name,
+        &parsed.args,
+        &parsed.redirections,
+        session,
+        &resolver,
+    );
 
     let active_write_path = view
         .layers

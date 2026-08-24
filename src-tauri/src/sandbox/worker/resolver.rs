@@ -255,6 +255,60 @@ impl RootResolver {
         Ok(names)
     }
 
+    /// `chmod`: changes the mode bits of `<name>` under `parent_rel` via
+    /// `fchmodat` against the already-`openat2`+`RESOLVE_BENEATH`-resolved
+    /// parent dirfd — the same "resolve the parent safely, then act on a
+    /// single validated path component" pattern `remove_file`/`mkdir`
+    /// already use, so this inherits the same containment guarantee
+    /// without needing a new raw syscall wrapper in `syscalls.rs` (`nix`'s
+    /// safe `fchmodat` binding is sufficient; no new `unsafe` block).
+    pub fn set_mode(&self, parent_rel: &str, name: &str, mode: u32) -> io::Result<()> {
+        if !is_single_safe_component(name) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("chmod name must be a single path component, got {name:?}"),
+            ));
+        }
+        let parent_fd = self.open_dir(parent_rel)?;
+        nix::sys::stat::fchmodat(
+            &parent_fd,
+            name,
+            nix::sys::stat::Mode::from_bits_truncate(mode),
+            nix::sys::stat::FchmodatFlags::FollowSymlink,
+        )
+        .map_err(io::Error::from)
+    }
+
+    /// `chown`: changes owner/group of `<name>` under `parent_rel` via
+    /// `fchownat`, same containment pattern as [`set_mode`](Self::set_mode).
+    /// A rootless process can only ever change ownership to its own euid
+    /// (or fails with `EPERM` for any other target) — that's real,
+    /// unmodified Linux `chown` semantics (§14 "Rootless"), not something
+    /// this method special-cases or works around.
+    pub fn set_owner(
+        &self,
+        parent_rel: &str,
+        name: &str,
+        uid: Option<u32>,
+        gid: Option<u32>,
+    ) -> io::Result<()> {
+        if !is_single_safe_component(name) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("chown name must be a single path component, got {name:?}"),
+            ));
+        }
+        let parent_fd = self.open_dir(parent_rel)?;
+        nix::unistd::fchownat(
+            &parent_fd,
+            name,
+            uid.map(nix::unistd::Uid::from_raw),
+            gid.map(nix::unistd::Gid::from_raw),
+            nix::fcntl::AtFlags::empty(),
+        )
+        .map_err(io::Error::from)
+    }
+
     pub fn stat(&self, rel_path: &str) -> io::Result<StatInfo> {
         let fd = self.open_read(rel_path)?;
         let metadata = File::from(fd).metadata()?;

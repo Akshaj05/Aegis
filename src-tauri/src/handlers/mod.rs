@@ -48,8 +48,13 @@
 //! function, same code, differing only in which `LayeredResolver` (built
 //! from a different `WriteTarget`, per `snapshot::backend`) it's given.
 
+mod coreutils_proc;
+mod fs_ext;
+mod info;
+mod text_filters;
+
 use crate::fs_abstraction::SandboxPath;
-use crate::parser::Arg;
+use crate::parser::{Arg, Redirection, RedirectionKind};
 use crate::sandbox::worker::protocol::FileKind;
 use crate::session::TerminalSession;
 use crate::simulation::resolver::LayeredResolver;
@@ -79,8 +84,27 @@ impl CommandResult {
     }
 }
 
-/// Phase-1-tier dispatcher. See module docs for its intended lifetime.
+/// Phase-1-tier dispatcher, now covering the broader coreutils-backed
+/// command set added alongside `handlers/fs_ext.rs`, `handlers/
+/// text_filters.rs`, and `handlers/info.rs` — see their module docs for
+/// how each command actually gets its filesystem/subprocess access.
+/// `redirections` (`>`/`>>`) is applied uniformly to every command's
+/// stdout after it runs, via [`apply_redirections`] — this is the first
+/// consumer of `ParsedCommand::redirections` anywhere in the crate; it was
+/// previously parsed but never acted on.
 pub fn dispatch(
+    name: &str,
+    args: &[Arg],
+    redirections: &[Redirection],
+    session: &mut TerminalSession,
+    resolver: &LayeredResolver,
+) -> CommandResult {
+    let mut result = dispatch_command(name, args, session, resolver);
+    apply_redirections(&mut result, redirections, session, resolver);
+    result
+}
+
+fn dispatch_command(
     name: &str,
     args: &[Arg],
     session: &mut TerminalSession,
@@ -95,7 +119,77 @@ pub fn dispatch(
         "cat" => cmd_cat(session, resolver, args),
         "echo" => cmd_echo(args),
         "rm" => cmd_rm(session, resolver, args),
+        "rmdir" => fs_ext::cmd_rmdir(session, resolver, args),
+        "cp" => fs_ext::cmd_cp(session, resolver, args),
+        "mv" => fs_ext::cmd_mv(session, resolver, args),
+        "chmod" => fs_ext::cmd_chmod(session, resolver, args),
+        "chown" => fs_ext::cmd_chown(session, resolver, args),
+        "find" => fs_ext::cmd_find(session, resolver, args),
+        "du" => fs_ext::cmd_du(session, resolver, args),
+        "df" => fs_ext::cmd_df(resolver),
+        "wc" => text_filters::cmd_wc(session, resolver, args),
+        "sort" => text_filters::cmd_sort(session, resolver, args),
+        "uniq" => text_filters::cmd_uniq(session, resolver, args),
+        "cut" => text_filters::cmd_cut(session, resolver, args),
+        "head" => text_filters::cmd_head(session, resolver, args),
+        "tail" => text_filters::cmd_tail(session, resolver, args),
+        "date" => text_filters::cmd_date(args),
+        "grep" => text_filters::cmd_grep(session, resolver, args),
+        "env" => info::cmd_env(session),
+        "printenv" => info::cmd_printenv(session, args),
+        "whoami" => info::cmd_whoami(),
+        "id" => info::cmd_id(),
+        "uname" => info::cmd_uname(args),
+        "sleep" => info::cmd_sleep(args),
         _ => CommandResult::error(format!("{name}: command not found"), 127),
+    }
+}
+
+/// Applies `>`/`>>` redirection to `result.stdout`, writing it through
+/// [`LayeredResolver::write_file`] and clearing it from the terminal
+/// output (matching real shell behavior: `echo hi > file` prints nothing
+/// to the terminal). `<` (input redirection) is refused with a clear
+/// error rather than silently ignored — no handler in this crate reads
+/// stdin yet (§ module doc), so there is nothing correct to wire it to.
+/// Applied regardless of `result`'s own exit code, matching a real
+/// shell's redirection setup happening before the command's own success
+/// or failure is known.
+fn apply_redirections(
+    result: &mut CommandResult,
+    redirections: &[Redirection],
+    session: &TerminalSession,
+    resolver: &LayeredResolver,
+) {
+    for redir in redirections {
+        match redir.kind {
+            RedirectionKind::Input => {
+                *result = CommandResult::error(
+                    "SafeShell does not support input (`<`) redirection: no handler reads stdin\n",
+                    1,
+                );
+                return;
+            }
+            RedirectionKind::Truncate | RedirectionKind::Append => {
+                let target = match resolve_arg(session, &redir.target) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        *result = CommandResult::error(format!("{e}\n"), 1);
+                        return;
+                    }
+                };
+                let mut contents = if redir.kind == RedirectionKind::Append {
+                    resolver.read_file(target.as_str()).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                contents.extend_from_slice(result.stdout.as_bytes());
+                if let Err(e) = resolver.write_file(target.as_str(), &contents) {
+                    *result = CommandResult::error(format!("{}: {e}\n", redir.target), 1);
+                    return;
+                }
+                result.stdout.clear();
+            }
+        }
     }
 }
 
@@ -451,13 +545,13 @@ mod tests {
         let (_tmp, resolver) = resolver();
         let mut session = TerminalSession::new();
 
-        let r = dispatch("mkdir", &args(&["project"]), &mut session, &resolver);
+        let r = dispatch("mkdir", &args(&["project"]), &[], &mut session, &resolver);
         assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
 
-        let r = dispatch("ls", &[], &mut session, &resolver);
+        let r = dispatch("ls", &[], &[], &mut session, &resolver);
         assert_eq!(r, CommandResult::ok("project\n"));
 
-        let r = dispatch("cd", &args(&["project"]), &mut session, &resolver);
+        let r = dispatch("cd", &args(&["project"]), &[], &mut session, &resolver);
         assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
 
         let r = cmd_pwd(&session);
@@ -469,7 +563,7 @@ mod tests {
         let (_tmp, resolver) = resolver();
         let mut session = TerminalSession::new();
 
-        let r = dispatch("cd", &args(&["nowhere"]), &mut session, &resolver);
+        let r = dispatch("cd", &args(&["nowhere"]), &[], &mut session, &resolver);
         assert_eq!(r.exit_code, 1);
         assert!(session.cwd().is_root());
     }
@@ -479,7 +573,7 @@ mod tests {
         let (_tmp, resolver) = resolver();
         let mut session = TerminalSession::new();
 
-        let r = dispatch("cd", &args(&[".."]), &mut session, &resolver);
+        let r = dispatch("cd", &args(&[".."]), &[], &mut session, &resolver);
         assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
         assert!(session.cwd().is_root());
     }
@@ -489,10 +583,10 @@ mod tests {
         let (_tmp, resolver) = resolver();
         let mut session = TerminalSession::new();
 
-        let r = dispatch("touch", &args(&["a.txt"]), &mut session, &resolver);
+        let r = dispatch("touch", &args(&["a.txt"]), &[], &mut session, &resolver);
         assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
 
-        let r = dispatch("cat", &args(&["a.txt"]), &mut session, &resolver);
+        let r = dispatch("cat", &args(&["a.txt"]), &[], &mut session, &resolver);
         assert_eq!(r, CommandResult::ok(""));
     }
 
@@ -501,7 +595,7 @@ mod tests {
         let (_tmp, resolver) = resolver();
         let mut session = TerminalSession::new();
 
-        let r = dispatch("cat", &args(&["missing.txt"]), &mut session, &resolver);
+        let r = dispatch("cat", &args(&["missing.txt"]), &[], &mut session, &resolver);
         assert_eq!(r.exit_code, 1);
         assert!(r.stderr.contains("missing.txt"));
     }
@@ -510,7 +604,13 @@ mod tests {
     fn echo_joins_args_with_spaces() {
         let mut session = TerminalSession::new();
         let (_tmp, resolver) = resolver();
-        let r = dispatch("echo", &args(&["hello", "world"]), &mut session, &resolver);
+        let r = dispatch(
+            "echo",
+            &args(&["hello", "world"]),
+            &[],
+            &mut session,
+            &resolver,
+        );
         assert_eq!(r, CommandResult::ok("hello world\n"));
     }
 
@@ -518,7 +618,7 @@ mod tests {
     fn unknown_command_returns_exit_127() {
         let mut session = TerminalSession::new();
         let (_tmp, resolver) = resolver();
-        let r = dispatch("frobnicate", &[], &mut session, &resolver);
+        let r = dispatch("frobnicate", &[], &[], &mut session, &resolver);
         assert_eq!(r.exit_code, 127);
     }
 
@@ -526,7 +626,7 @@ mod tests {
     fn mkdir_missing_operand_is_an_error() {
         let mut session = TerminalSession::new();
         let (_tmp, resolver) = resolver();
-        let r = dispatch("mkdir", &[], &mut session, &resolver);
+        let r = dispatch("mkdir", &[], &[], &mut session, &resolver);
         assert_eq!(r.exit_code, 1);
     }
 
@@ -534,7 +634,7 @@ mod tests {
     fn mkdir_root_is_rejected_cleanly() {
         let mut session = TerminalSession::new();
         let (_tmp, resolver) = resolver();
-        let r = dispatch("mkdir", &args(&["/"]), &mut session, &resolver);
+        let r = dispatch("mkdir", &args(&["/"]), &[], &mut session, &resolver);
         assert_eq!(r.exit_code, 1);
     }
 
@@ -543,13 +643,13 @@ mod tests {
         let mut session = TerminalSession::new();
         let (_tmp, resolver) = resolver();
 
-        let r = dispatch("touch", &args(&["a.txt"]), &mut session, &resolver);
+        let r = dispatch("touch", &args(&["a.txt"]), &[], &mut session, &resolver);
         assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
 
-        let r = dispatch("rm", &args(&["a.txt"]), &mut session, &resolver);
+        let r = dispatch("rm", &args(&["a.txt"]), &[], &mut session, &resolver);
         assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
 
-        let r = dispatch("cat", &args(&["a.txt"]), &mut session, &resolver);
+        let r = dispatch("cat", &args(&["a.txt"]), &[], &mut session, &resolver);
         assert_eq!(r.exit_code, 1);
     }
 
@@ -558,10 +658,10 @@ mod tests {
         let mut session = TerminalSession::new();
         let (_tmp, resolver) = resolver();
 
-        let r = dispatch("mkdir", &args(&["project"]), &mut session, &resolver);
+        let r = dispatch("mkdir", &args(&["project"]), &[], &mut session, &resolver);
         assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
 
-        let r = dispatch("rm", &args(&["project"]), &mut session, &resolver);
+        let r = dispatch("rm", &args(&["project"]), &[], &mut session, &resolver);
         assert_eq!(r.exit_code, 1);
         assert!(r.stderr.contains("project"));
     }
@@ -571,18 +671,25 @@ mod tests {
         let mut session = TerminalSession::new();
         let (_tmp, resolver) = resolver();
 
-        dispatch("mkdir", &args(&["project"]), &mut session, &resolver);
+        dispatch("mkdir", &args(&["project"]), &[], &mut session, &resolver);
         dispatch(
             "touch",
             &args(&["project/file.txt"]),
+            &[],
             &mut session,
             &resolver,
         );
 
-        let r = dispatch("rm", &args(&["-r", "project"]), &mut session, &resolver);
+        let r = dispatch(
+            "rm",
+            &args(&["-r", "project"]),
+            &[],
+            &mut session,
+            &resolver,
+        );
         assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
 
-        let r = dispatch("ls", &[], &mut session, &resolver);
+        let r = dispatch("ls", &[], &[], &mut session, &resolver);
         assert_eq!(r, CommandResult::ok(""));
     }
 
@@ -591,8 +698,14 @@ mod tests {
         let mut session = TerminalSession::new();
         let (_tmp, resolver) = resolver();
 
-        dispatch("mkdir", &args(&["project"]), &mut session, &resolver);
-        let r = dispatch("rm", &args(&["-rf", "project"]), &mut session, &resolver);
+        dispatch("mkdir", &args(&["project"]), &[], &mut session, &resolver);
+        let r = dispatch(
+            "rm",
+            &args(&["-rf", "project"]),
+            &[],
+            &mut session,
+            &resolver,
+        );
         assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
     }
 
@@ -601,7 +714,7 @@ mod tests {
         let mut session = TerminalSession::new();
         let (_tmp, resolver) = resolver();
 
-        let r = dispatch("rm", &args(&["missing.txt"]), &mut session, &resolver);
+        let r = dispatch("rm", &args(&["missing.txt"]), &[], &mut session, &resolver);
         assert_eq!(r.exit_code, 1);
         assert!(r.stderr.contains("missing.txt"));
     }
@@ -611,7 +724,13 @@ mod tests {
         let mut session = TerminalSession::new();
         let (_tmp, resolver) = resolver();
 
-        let r = dispatch("rm", &args(&["-f", "missing.txt"]), &mut session, &resolver);
+        let r = dispatch(
+            "rm",
+            &args(&["-f", "missing.txt"]),
+            &[],
+            &mut session,
+            &resolver,
+        );
         assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
         assert!(r.stderr.is_empty());
     }
@@ -621,7 +740,7 @@ mod tests {
         let mut session = TerminalSession::new();
         let (_tmp, resolver) = resolver();
 
-        let r = dispatch("rm", &[], &mut session, &resolver);
+        let r = dispatch("rm", &[], &[], &mut session, &resolver);
         assert_eq!(r.exit_code, 1);
     }
 
@@ -630,12 +749,12 @@ mod tests {
         let mut session = TerminalSession::new();
         let (_tmp, resolver) = resolver();
 
-        dispatch("touch", &args(&["a.txt"]), &mut session, &resolver);
-        dispatch("rm", &args(&["a.txt"]), &mut session, &resolver);
-        let r = dispatch("touch", &args(&["a.txt"]), &mut session, &resolver);
+        dispatch("touch", &args(&["a.txt"]), &[], &mut session, &resolver);
+        dispatch("rm", &args(&["a.txt"]), &[], &mut session, &resolver);
+        let r = dispatch("touch", &args(&["a.txt"]), &[], &mut session, &resolver);
         assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
 
-        let r = dispatch("cat", &args(&["a.txt"]), &mut session, &resolver);
+        let r = dispatch("cat", &args(&["a.txt"]), &[], &mut session, &resolver);
         assert_eq!(r, CommandResult::ok(""));
     }
 
@@ -644,15 +763,21 @@ mod tests {
         let mut session = TerminalSession::new();
         let (_tmp, resolver) = resolver();
 
-        dispatch("mkdir", &args(&["d"]), &mut session, &resolver);
-        dispatch("touch", &args(&["d/a.txt"]), &mut session, &resolver);
-        dispatch("touch", &args(&["d/b.txt"]), &mut session, &resolver);
-        dispatch("touch", &args(&["d/keep.log"]), &mut session, &resolver);
+        dispatch("mkdir", &args(&["d"]), &[], &mut session, &resolver);
+        dispatch("touch", &args(&["d/a.txt"]), &[], &mut session, &resolver);
+        dispatch("touch", &args(&["d/b.txt"]), &[], &mut session, &resolver);
+        dispatch(
+            "touch",
+            &args(&["d/keep.log"]),
+            &[],
+            &mut session,
+            &resolver,
+        );
 
-        let r = dispatch("rm", &args(&["d/*.txt"]), &mut session, &resolver);
+        let r = dispatch("rm", &args(&["d/*.txt"]), &[], &mut session, &resolver);
         assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
 
-        let r = dispatch("ls", &args(&["d"]), &mut session, &resolver);
+        let r = dispatch("ls", &args(&["d"]), &[], &mut session, &resolver);
         assert_eq!(r, CommandResult::ok("keep.log\n"));
     }
 
@@ -661,15 +786,21 @@ mod tests {
         let mut session = TerminalSession::new();
         let (_tmp, resolver) = resolver();
 
-        dispatch("mkdir", &args(&["d"]), &mut session, &resolver);
-        dispatch("mkdir", &args(&["d/sub"]), &mut session, &resolver);
-        dispatch("touch", &args(&["d/sub/f.txt"]), &mut session, &resolver);
-        dispatch("touch", &args(&["d/a.txt"]), &mut session, &resolver);
+        dispatch("mkdir", &args(&["d"]), &[], &mut session, &resolver);
+        dispatch("mkdir", &args(&["d/sub"]), &[], &mut session, &resolver);
+        dispatch(
+            "touch",
+            &args(&["d/sub/f.txt"]),
+            &[],
+            &mut session,
+            &resolver,
+        );
+        dispatch("touch", &args(&["d/a.txt"]), &[], &mut session, &resolver);
 
-        let r = dispatch("rm", &args(&["-rf", "d/*"]), &mut session, &resolver);
+        let r = dispatch("rm", &args(&["-rf", "d/*"]), &[], &mut session, &resolver);
         assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
 
-        let r = dispatch("ls", &args(&["d"]), &mut session, &resolver);
+        let r = dispatch("ls", &args(&["d"]), &[], &mut session, &resolver);
         assert_eq!(r, CommandResult::ok(""));
     }
 
@@ -678,9 +809,9 @@ mod tests {
         let mut session = TerminalSession::new();
         let (_tmp, resolver) = resolver();
 
-        dispatch("mkdir", &args(&["d"]), &mut session, &resolver);
+        dispatch("mkdir", &args(&["d"]), &[], &mut session, &resolver);
 
-        let r = dispatch("rm", &args(&["-f", "d/*"]), &mut session, &resolver);
+        let r = dispatch("rm", &args(&["-f", "d/*"]), &[], &mut session, &resolver);
         assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
         assert!(r.stderr.is_empty());
     }

@@ -5,6 +5,12 @@ edition = "2021"
 description = "SafeShell: transactional, simulated-then-executed shell command pipeline"
 license = "UNLICENSED"
 publish = false
+# Without this, `cargo run` can't infer a default binary once more than
+# one `[[bin]]` target exists — the `safeshell-*` coreutils sidecars
+# (`src/bin/`) made that ambiguous. `safeshell` (this app) is the only
+# one anyone runs directly; the sidecars are only ever invoked by
+# `handlers::coreutils_proc` via an explicit path, never by name lookup.
+default-run = "safeshell"
 
 [lib]
 name = "safeshell"
@@ -66,6 +72,14 @@ tauri = { version = "2", features = [] }
 # changes where the process reads the vars from. `dotenvy` is a
 # maintained fork of the unmaintained `dotenv` crate.
 dotenvy = "0.15"
+uu_wc = "0.10.0"
+uu_sort = "0.10.0"
+uu_uniq = "0.10.0"
+uu_cut = "0.10.0"
+uu_head = "0.10.0"
+uu_tail = "0.10.0"
+uu_date = "0.10.0"
+regex = "1.13.1"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

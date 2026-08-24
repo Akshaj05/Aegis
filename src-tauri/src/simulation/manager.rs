@@ -73,7 +73,13 @@ pub fn simulate(
     let view = backend.mount_view(layers, WriteTarget::Transient(transient_id))?;
     let resolver = LayeredResolver::from_mounted_view(&view)?;
 
-    let command_result = handlers::dispatch(&parsed.name, &parsed.args, session, &resolver);
+    let command_result = handlers::dispatch(
+        &parsed.name,
+        &parsed.args,
+        &parsed.redirections,
+        session,
+        &resolver,
+    );
 
     let transient_layer_path = view
         .layers

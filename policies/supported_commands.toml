@@ -29,10 +29,19 @@ schema_version = "1.0"
 [tiers.supported]
 # Native Rust handlers implementing documented semantics for the documented
 # flag set; the same handler is used for both simulation and execution.
+# `head`/`tail`/`wc`/`sort`/`uniq`/`cut`/`date` are backed by real uutils
+# binaries spawned as stdin/stdout-only subprocesses (never given a path
+# argument — see `handlers/coreutils_proc.rs`), not hand-reimplemented;
+# `ln`, `mkfifo`, `export`, `which`, `history` remain unimplemented (no
+# handler exists yet, same "known gap, not a security issue" status this
+# file's header already applies to the rest of this list before this
+# change).
 commands = [
   "ls", "cd", "pwd", "mkdir", "rmdir", "touch", "rm", "cp", "mv", "cat",
   "echo", "chmod", "chown", "ln", "head", "tail", "wc",
   "mkfifo", "export", "env", "which", "history",
+  "sort", "uniq", "cut", "du", "df", "printenv", "whoami", "id", "uname",
+  "date", "sleep",
 ]
 
 [tiers.partially_supported]

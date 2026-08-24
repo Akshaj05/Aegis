@@ -177,7 +177,10 @@ mod tests {
     #[test]
     fn a_capitalized_intent_and_recovery_strategy_are_normalized_not_discarded() {
         let json = valid_json()
-            .replace("\"intent\": \"directory_create\"", "\"intent\": \"Directory_Create\"")
+            .replace(
+                "\"intent\": \"directory_create\"",
+                "\"intent\": \"Directory_Create\"",
+            )
             .replace(
                 "\"strategy\": \"no_recovery_needed\"",
                 "\"strategy\": \"NO_RECOVERY_NEEDED\"",
