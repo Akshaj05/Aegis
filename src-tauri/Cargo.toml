@@ -12,6 +12,21 @@ publish = false
 # `handlers::coreutils_proc` via an explicit path, never by name lookup.
 default-run = "safeshell"
 
+# Standard Tauri project convention (normally scaffolded by
+# `create-tauri-app`, missing here since this crate predates that
+# scaffold) — `tauri`'s own `custom-protocol` feature is "managed by the
+# Tauri CLI" (its doc comment's exact words): disabled, a build loads
+# `tauri.conf.json`'s `devUrl` (the live Vite dev server) — what `npm run
+# tauri dev` wants, and this feature stays off by default so that
+# workflow is completely unaffected. Enabled (`cargo build --release
+# --features custom-protocol`, only done in `docker/Dockerfile`), a build
+# instead loads the embedded `frontendDist` assets — required for any
+# build meant to run standalone, without a dev server. Purely a Cargo
+# feature toggle already defined by the `tauri` crate itself; no
+# application code changed.
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
 [lib]
 name = "safeshell"
 path = "src/lib.rs"

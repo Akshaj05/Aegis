@@ -52,6 +52,27 @@ first); as with `RemoteBackend`, the model's raw output is never trusted
 directly — it goes through the same `ai::validation::validate` every other
 backend's output does before it can become an `AiPlan` (§21.7).
 
+## Disclosed data flow: the coreutils sidecar subprocesses (`handlers::coreutils_proc`)
+
+Not a network flow — a local one, disclosed for the same reason the AI backend flow above is: it's
+a real, undisclosed-until-now process boundary a reviewer would otherwise have to find in the code
+themselves. `wc`, `sort`, `uniq`, `cut`, `head`, `tail`, and `date` are implemented by spawning a
+real OS process — one of SafeShell's own compiled `safeshell-{wc,sort,uniq,cut,head,tail,date}`
+binaries (real `uutils`/coreutils crates under the hood), via `std::process::Command` with an
+explicit argv, never a shell string. Two properties keep this from being a general
+subprocess-execution primitive: the binary is always one of these seven fixed, SafeShell-compiled
+paths (never a user-named or `PATH`-resolved command), and its argv never contains a filesystem
+path — only flags. Any file content the command needs is read beforehand through the sandboxed
+resolver (§25's `openat2`+`RESOLVE_BENEATH` containment) and piped to the subprocess over stdin;
+its stdout/stderr are captured, never inherited by or shared with SafeShell's own process. A
+compromised or buggy sidecar binary therefore has no path handed to it to reach in the first
+place — worst case is a wrong or hung transformation of bytes SafeShell already had, not a
+containment breach. One caveat worth stating plainly: the subprocess is spawned with this
+process's full environment (not the simulated session's `TerminalSession` environment, and not
+cleared) — none of these seven commands read environment variables for anything security-relevant,
+but this is a real difference from how the simulated shell's own `env`/`printenv` commands report
+environment state, and is disclosed here rather than left implicit.
+
 ## Explicitly not modeled as an adversary
 
 The user performing destructive operations on purpose inside the SafeShell

@@ -86,7 +86,10 @@ models/
 *.onnx
 
 # ---------- Build Artifacts ----------
-bin/
+# Anchored to the repo root: an unanchored `bin/` also matched
+# `src-tauri/src/bin/` (real source for the coreutils sidecar binaries,
+# not build output), silently excluding it from every commit.
+/bin/
 obj/
 out/
 release/

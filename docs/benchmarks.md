@@ -56,10 +56,14 @@ inject real drift and both are caught) and 0% false-positive rate on the tolerat
 corpus triggers `rollback::automatic_rollback` for real, and every rollback in the corpus succeeds
 (100% rollback success rate, n=2 — small corpus, honestly small).
 
-This corpus is small (four scenarios) because it's built from the meaningful-mismatch conditions
-this pipeline's current handler set (`pwd, cd, mkdir, touch, ls, cat, echo`) can actually produce —
-see `tests/verification_tolerance_tests/main.rs`'s own module doc for which §26.2 conditions aren't
-reachable yet and why. Growing the handler set grows this corpus, not the other way around.
+This corpus was small (four scenarios) because it was built from the meaningful-mismatch conditions
+the handler set available at the time (`pwd, cd, mkdir, touch, ls, cat, echo`) could actually
+produce; the handler set has since grown substantially (`rmdir, cp, mv, chmod, chown, find, du, df,
+truncate, shred, safeshell-pkg`, plus the uutils-backed `wc, sort, uniq, cut, head, tail, date,
+grep`) — see `tests/verification_tolerance_tests/main.rs`'s own module doc for which §26.2
+conditions weren't reachable at the time and why. This corpus itself has not been re-grown to match
+yet — a real follow-up, not claimed as done here. Growing the handler set grows this corpus, not
+the other way around.
 
 ## Risk-classification accuracy (§43's "must not be denied" / "must always be denied" corpus)
 
