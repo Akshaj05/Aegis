@@ -1,22 +1,6 @@
-//! Retention policy and dependency-aware GC (§23.3-§23.4) — the squash
-//! algorithm flagged as "algorithmically delicate" all the way back at
-//! this project's initial scaffold, now implemented for real.
-//!
-//! **Whiteout-aware squashing**: §23.4's squash step ("merge `C_1` into
-//! base, producing `base'`... squashing preserves the current environment
-//! state exactly") has to handle deletions now that `rm` exists.
-//! `handlers/mod.rs`'s `rm` goes through `LayeredResolver::remove`, which
-//! records a deletion of a path that also exists in a lower layer as a
-//! `.wh.<name>` marker (`sandbox::worker::resolver::WHITEOUT_PREFIX`)
-//! rather than by literally deleting anything outside its own layer —
-//! there is no real kernel overlay filesystem underneath
-//! `CopyUpSimulationBackend` to do that with. Squashing is where that
-//! marker finally gets resolved into a real deletion: `checkpoints[0]` is
-//! always squashed directly onto `base` (never onto another checkpoint),
-//! and squashing proceeds oldest-first, so by the time a given
-//! checkpoint's whiteout is processed, `base` already reflects every
-//! earlier checkpoint's effects — meaning the whiteout's target, if it
-//! exists at all, is found directly in `base`.
+// Checkpoint retention policy and dependency-aware garbage collection:
+// squashes the oldest checkpoint into the consolidated base, resolving
+// whiteout markers into real deletions, until the stack is within bounds.
 
 use std::path::Path;
 
@@ -25,7 +9,6 @@ use crate::snapshot::backend::{
     CheckpointId, LayerId, LayerStack, SimulationBackend, SimulationError,
 };
 
-/// §23.3's two bounds. Both enforced, whichever binds first.
 #[derive(Debug, Clone, Copy)]
 pub struct RetentionPolicy {
     pub max_checkpoints: usize,
@@ -33,8 +16,6 @@ pub struct RetentionPolicy {
 }
 
 impl Default for RetentionPolicy {
-    /// §23.3's MVP defaults: "maximum 10 retained committed checkpoints"
-    /// and "configurable, default 1 GB."
     fn default() -> Self {
         RetentionPolicy {
             max_checkpoints: 10,
@@ -45,21 +26,9 @@ impl Default for RetentionPolicy {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GcOutcome {
-    /// Oldest-first, matching squash order. Callers (the DB layer) must
-    /// set `snapshots.recoverable = 0` for exactly these ids, in the same
-    /// database transaction as recording the GC event (§23.4).
     pub squashed_checkpoints: Vec<CheckpointId>,
 }
 
-/// §23.4's algorithm: while over either bound *and* more than one
-/// checkpoint remains, squash the oldest into the consolidated base.
-/// Never squashes the newest checkpoint (§23.4 point 3: "Undo Last
-/// Transaction must always remain available"), which the `count > 1`
-/// guard enforces structurally — the loop simply has nothing left to
-/// squash once one checkpoint remains, regardless of how far over budget
-/// storage still is (§23.4 point 4: that's the storage-ceiling-reached
-/// case, handled by callers refusing new snapshots, not by this function
-/// squashing the last checkpoint to make room).
 pub fn run_gc(
     backend: &dyn SimulationBackend,
     layers: &mut LayerStack,
@@ -96,8 +65,6 @@ fn total_retained_bytes(
     for (id, _) in &layers.checkpoints {
         total += backend.layer_size_bytes(LayerId::Checkpoint(*id))?;
     }
-    // §23.3: "total size of all retained checkpoint layers plus the
-    // active write layer."
     total += directory_size_bytes(&layers.active_write)?;
     Ok(total)
 }
@@ -116,14 +83,6 @@ fn directory_size_bytes(path: &Path) -> std::io::Result<u64> {
     Ok(total)
 }
 
-/// Merges `checkpoint_path`'s content into `base_path`, overwriting any
-/// conflicting entries — a checkpoint only ever contains what changed
-/// relative to the layers beneath it (§14.3: sealing renames the active
-/// write layer, which holds deltas, not full snapshots), so "merge into
-/// base" is exactly "apply these changes to base." A `.wh.<name>` entry is
-/// not itself copied forward: it instead triggers a real, recursive
-/// removal of `<name>` from `base_path` (see module doc for why `base` is
-/// always where the whiteout's target is found).
 fn squash_oldest_into_base(checkpoint_path: &Path, base_path: &Path) -> std::io::Result<()> {
     for entry in std::fs::read_dir(checkpoint_path)? {
         let entry = entry?;
@@ -236,8 +195,6 @@ mod tests {
             backend.seal_active_layer(&mut stack).unwrap();
         }
 
-        // Impossible-to-satisfy ceiling: even squashed down to one
-        // checkpoint, GC must stop rather than remove the last one.
         let policy = RetentionPolicy {
             max_checkpoints: 100,
             storage_ceiling_bytes: 1,
@@ -267,9 +224,6 @@ mod tests {
         let outcome = run_gc(&backend, &mut stack, &policy).unwrap();
 
         assert_eq!(outcome.squashed_checkpoints, vec![id1]);
-        // §23.4: "Squashing preserves the current environment state
-        // exactly" — the file from the squashed checkpoint must now be
-        // readable from base.
         assert_eq!(
             std::fs::read_to_string(stack.base.join("a.txt")).unwrap(),
             "from checkpoint"

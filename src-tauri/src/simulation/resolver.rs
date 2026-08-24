@@ -1,41 +1,6 @@
-//! `LayeredResolver` — real filesystem resolution across an ordered stack
-//! of layers, composed from `sandbox/worker/resolver.rs`'s `RootResolver`
-//! rather than reinventing path-safety logic: each layer gets its own
-//! `RootResolver`, so every read/write in this module inherits real
-//! `openat2`+`RESOLVE_BENEATH` containment for free (§25.2). This module's
-//! only new responsibility is *which layer* handles a given operation —
-//! never *how* a single layer is safely resolved.
-//!
-//! This is what `snapshot/backend.rs`'s module doc named as deferred to
-//! this phase: "Building [a merged read/write API over `MountedView`]...
-//! is explicitly Build order phase 6's job."
-//!
-//! **Scope note on writes**: reads fall through the stack top-to-bottom
-//! (§14.3's "read-only lower layers are `[W, C_n, ..., base]`"); writes
-//! always target the top (index 0) layer only. `touch`/`mkdir` check
-//! whether their target already exists lower in the stack and behave
-//! accordingly — `touch` copies a lower file's content up before
-//! "creating" it (a plain top-layer `O_CREAT` would otherwise shadow the
-//! real content with an empty file), `mkdir` refuses to recreate a
-//! directory that already exists anywhere in the stack.
-//!
-//! **Whiteout support** (added for `rm`'s handler — see
-//! `sandbox/worker/resolver.rs::WHITEOUT_PREFIX`'s doc comment for the
-//! marker convention itself): [`remove`](Self::remove) physically deletes
-//! any real copy of the target that exists in the top layer, and — only
-//! when the target *also* exists in some lower layer, which can't be
-//! deleted for real — leaves a `.wh.<name>` marker in the top layer next
-//! to it. Every read method (`stat`, `read_file`, `read_dir`) checks, for
-//! each layer top-to-bottom, whether that layer *or any layer above it*
-//! has a whiteout covering the target path *or any of its ancestor
-//! directories* — [`is_hidden_by_whiteout`](Self::is_hidden_by_whiteout)
-//! — before consulting that layer's real content, and stops (reports
-//! "not found") the moment one is found, rather than falling through to
-//! whatever a deleted directory's lower-layer remnants still contain.
-//! One marker per deleted name is enough regardless of how much it
-//! contained: a directory's whiteout hides its entire subtree, exactly
-//! like a real overlay filesystem's opaque-directory semantics, so
-//! nothing inside a deleted directory ever needs its own marker.
+// LayeredResolver: merged read/write filesystem resolution across an
+// ordered stack of layers, with whiteout-based deletion support, built
+// on top of sandbox/worker/resolver.rs's per-layer RootResolver.
 
 use std::io;
 
@@ -52,8 +17,6 @@ fn child_path(parent_rel: &str, name: &str) -> String {
 }
 
 pub struct LayeredResolver {
-    /// Top to bottom, matching `MountedView.layers`'s ordering — index 0
-    /// is the sole writable layer.
     layers: Vec<RootResolver>,
 }
 
@@ -81,42 +44,12 @@ impl LayeredResolver {
         &self.layers[1..]
     }
 
-    /// Best-effort cleanup after creating a real `<name>` in the top
-    /// layer: removes a same-layer `.wh.<name>` marker if one happens to
-    /// be present, so a whiteout can never coexist with the real entry it
-    /// was recording the absence of. In the real pipeline this is
-    /// normally a harmless no-op (`rm` and a later `touch`/`mkdir` of the
-    /// same name are always separate transactions, sealed into separate
-    /// layers by the time the second one runs) — but `LayeredResolver` is
-    /// tested and usable standalone, where "remove, then re-create, in
-    /// the same layer" is a real, reachable sequence, and without this
-    /// cleanup the stale marker would make the freshly re-created entry
-    /// invisible again (`is_hidden_by_whiteout` stops at the first
-    /// whiteout it finds, before ever checking that layer's real
-    /// content).
     fn clear_stale_whiteout(&self, parent_rel: &str, name: &str) {
         let _ = self
             .top()
             .remove_file(parent_rel, &format!("{WHITEOUT_PREFIX}{name}"));
     }
 
-    /// Copies up empty directory *shells* (no content) for every ancestor
-    /// of `dir_rel` that exists somewhere in the stack but not yet in the
-    /// top layer. This is the piece the module doc's "writes always
-    /// target the top layer" scope note glossed over: every write here
-    /// ultimately reaches `RootResolver`'s `openat2`+`RESOLVE_BENEATH`
-    /// *within the top layer alone* (the union view is a read-side
-    /// construct only), so on a fresh session — before anything has been
-    /// written under it — a directory seeded only in `base` (which is
-    /// every directory in the seeded image, e.g. `home/user`, `tmp`) has
-    /// no real counterpart for the kernel to resolve `parent_rel`
-    /// against, and the underlying `openat2` call fails with `ENOENT`
-    /// before the write it's spelling out ever runs. `touch`'s own
-    /// lower-layer-content copy-up handles a *file's* content the moment
-    /// something is actually created there; this handles the directories
-    /// leading up to it, which needed the same treatment but never got
-    /// it. Whiteout-aware via `stat` — a directory `rm -r`'d earlier is
-    /// correctly left un-recreated, matching `mkdir`'s own contract.
     fn ensure_top_dir_chain(&self, dir_rel: &str) -> io::Result<()> {
         let mut parent = String::new();
         for component in dir_rel.split('/').filter(|s| !s.is_empty()) {
@@ -126,10 +59,6 @@ impl LayeredResolver {
                     Ok(info) if info.kind == FileKind::Directory => {
                         self.top().mkdir(&parent, component)?;
                     }
-                    // Doesn't exist anywhere, or exists as a non-directory
-                    // — either way, not this helper's job to report; the
-                    // caller's own real operation will surface the right
-                    // error against the path it actually cares about.
                     _ => return Ok(()),
                 }
             }
@@ -138,15 +67,6 @@ impl LayeredResolver {
         Ok(())
     }
 
-    /// `touch`: a no-op if the target already exists in the top layer
-    /// (matching `RootResolver::touch`'s own contract); if it exists only
-    /// in a lower layer, copies its content up first rather than shadowing
-    /// it with an empty file (see module doc); otherwise, an ordinary
-    /// create. Reuses [`read_file`](Self::read_file)'s own whiteout-aware
-    /// fallthrough (rather than walking `lower_layers()` directly) so
-    /// re-creating a file after a `rm` doesn't accidentally copy up a
-    /// stale, supposedly-deleted lower-layer version that a whiteout is
-    /// hiding.
     pub fn touch(&self, rel_path: &str) -> io::Result<()> {
         if self.top().stat(rel_path).is_ok() {
             return Ok(());
@@ -164,12 +84,6 @@ impl LayeredResolver {
         result
     }
 
-    /// `mkdir`: refuses if the target already exists anywhere in the
-    /// stack (matching real `mkdir`'s `EEXIST` behavior — without this
-    /// check, a directory that already exists in a lower layer would
-    /// silently and pointlessly get an empty shadow copy in the top
-    /// layer). Uses [`stat`](Self::stat), which is whiteout-aware, so a
-    /// directory `rm -r`'d earlier is correctly re-creatable.
     pub fn mkdir(&self, parent_rel: &str, name: &str) -> io::Result<()> {
         let rel_path = child_path(parent_rel, name);
         if self.stat(&rel_path).is_ok() {
@@ -186,13 +100,6 @@ impl LayeredResolver {
         result
     }
 
-    /// `write_file`: creates or overwrites `rel_path` in the top layer with
-    /// exactly `contents`, regardless of what (if anything) exists at that
-    /// path in a lower layer — the top layer always wins on a write, same
-    /// as `touch`/`mkdir`. Used by redirection (`>`/`>>`) and by `cp`/`mv`,
-    /// which read a source's bytes via [`read_file`](Self::read_file) and
-    /// hand them here rather than needing a new cross-layer "copy"
-    /// primitive of their own.
     pub fn write_file(&self, rel_path: &str, contents: &[u8]) -> io::Result<()> {
         let (parent, name) = rel_path.rsplit_once('/').unwrap_or(("", rel_path));
         self.ensure_top_dir_chain(parent)?;
@@ -203,14 +110,6 @@ impl LayeredResolver {
         result
     }
 
-    /// `chmod`/`chown`: like `write_file`, these are mutations that must
-    /// land for real in the top layer for the change to be visible (a
-    /// lower layer is sealed/read-only checkpoint content) — but unlike
-    /// `write_file`, there's no content to copy up: if `<name>` doesn't
-    /// already have a real copy in the top layer, `touch`'s own copy-up
-    /// (content-preserving) is reused first so the mode/owner change
-    /// applies to a full copy of the file, not an empty shell that would
-    /// silently lose the lower layer's content.
     fn ensure_top_copy(&self, rel_path: &str) -> io::Result<()> {
         if self.top().stat(rel_path).is_ok() {
             return Ok(());
@@ -238,14 +137,6 @@ impl LayeredResolver {
         self.top().set_owner(parent, name, uid, gid)
     }
 
-    /// `rm`: removes `<name>` under `parent_rel`. `recursive` gates
-    /// directories only (matching real `rm`'s `-r`/`rmdir` split) — a
-    /// file is always removable regardless of the flag. Physically
-    /// deletes any real copy in the top layer; if `<name>` also exists in
-    /// a lower layer (which can't be deleted for real — it may be
-    /// checkpointed, shared, or part of the base image), leaves a single
-    /// whiteout marker there instead of walking and marking every
-    /// descendant individually (see module doc).
     pub fn remove(&self, parent_rel: &str, name: &str, recursive: bool) -> io::Result<()> {
         let rel_path = child_path(parent_rel, name);
         let info = self.stat(&rel_path)?;
@@ -258,9 +149,6 @@ impl LayeredResolver {
         let is_dir = info.kind == FileKind::Directory;
         self.ensure_top_dir_chain(parent_rel)?;
 
-        // Best-effort: remove any real, top-layer-local copy. `NotFound`
-        // there is expected and fine — the content may live only in a
-        // lower layer, which is exactly what the whiteout below is for.
         let top_removal = if is_dir {
             self.top().remove_dir_recursive(parent_rel, name)
         } else {
@@ -282,15 +170,6 @@ impl LayeredResolver {
         Ok(())
     }
 
-    /// Whether `rel_path` — or any of its ancestor directories — has been
-    /// recorded as deleted in `self.layers[..=layer_index]` (this layer
-    /// or any layer above it in resolution order). A whiteout at any
-    /// ancestor hides everything beneath it, so this walks every prefix
-    /// of `rel_path`, not just the exact path, checking each against
-    /// every layer from the top down to (and including) `layer_index`.
-    /// Callers stop falling through entirely the moment this returns
-    /// true — deeper layers' real content must never become visible
-    /// again once something above has recorded it as gone.
     fn is_hidden_by_whiteout(&self, rel_path: &str, layer_index: usize) -> bool {
         let components: Vec<&str> = rel_path.split('/').filter(|s| !s.is_empty()).collect();
         for layer in &self.layers[..=layer_index] {
@@ -305,13 +184,6 @@ impl LayeredResolver {
         false
     }
 
-    /// Read fallthrough: the first layer (top to bottom) where `rel_path`
-    /// resolves to something readable wins, unless a whiteout at or above
-    /// that layer hides it first (see module doc). An entry that exists
-    /// in a higher layer as the *wrong kind* (e.g. a directory shadowing a
-    /// lower-layer file of the same name) is intentionally **not** skipped
-    /// in favor of the lower one — that shadowing is correct union
-    /// semantics, not a fallthrough case.
     pub fn read_file(&self, rel_path: &str) -> io::Result<Vec<u8>> {
         for (i, layer) in self.layers.iter().enumerate() {
             if self.is_hidden_by_whiteout(rel_path, i) {
@@ -340,18 +212,6 @@ impl LayeredResolver {
         Err(not_found(rel_path))
     }
 
-    /// Merged listing across every layer (union of names, deduplicated),
-    /// whiteout-aware in both directions: a name whited out by a higher
-    /// layer never appears even if a lower layer still really has it, and
-    /// the whiteout marker files themselves (`.wh.*`) are never shown as
-    /// entries — they're this module's own bookkeeping, not user content.
-    /// A single top-to-bottom pass is enough (rather than re-scanning
-    /// higher layers per lower one): whiteouts accumulate as the layers
-    /// are visited in priority order, so by the time a lower layer's
-    /// entries are considered, every higher-layer whiteout that could
-    /// affect them has already been recorded. Errors only if `rel_path`
-    /// doesn't resolve to a directory in **any** layer, or is itself
-    /// hidden by a whiteout.
     pub fn read_dir(&self, rel_path: &str) -> io::Result<Vec<String>> {
         let mut visible = std::collections::BTreeSet::new();
         let mut hidden_names: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -376,13 +236,6 @@ impl LayeredResolver {
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                // A layer where rel_path exists but isn't a directory
-                // (e.g. ENOTDIR) is also just "not a directory here" —
-                // still worth trying the remaining layers rather than
-                // failing outright, since a higher layer's non-directory
-                // entry already shadows this one via `stat`/`read_file`'s
-                // own fallthrough; `read_dir` callers only reach this path
-                // when they already expect a directory.
                 Err(_) => continue,
             }
         }
@@ -457,8 +310,6 @@ mod tests {
             LayeredResolver::from_mounted_view(&view_of(&[top.path(), bottom.path()])).unwrap();
         resolver.touch("a.txt").unwrap();
 
-        // The copy-up must have happened: the top layer now has the real
-        // content, not an empty file.
         assert_eq!(
             std::fs::read(top.path().join("a.txt")).unwrap(),
             b"precious content"
@@ -499,12 +350,6 @@ mod tests {
 
     #[test]
     fn mkdir_creates_a_directory_under_a_parent_that_only_exists_in_a_lower_layer() {
-        // Regression: every directory in a freshly seeded session lives
-        // only in the base layer until something is written under it —
-        // `mkdir`/`touch`/`remove` must copy up the parent directory
-        // shell before asking the top layer's `RootResolver` to resolve
-        // into it, or this fails with `ENOENT` even though the target
-        // path is entirely valid.
         let top = tempfile::tempdir().unwrap();
         let bottom = tempfile::tempdir().unwrap();
         std::fs::create_dir(bottom.path().join("tmp")).unwrap();
@@ -606,8 +451,6 @@ mod tests {
         assert_eq!(resolver.read_file("a.txt").unwrap(), b"solo");
     }
 
-    // --- rm / whiteout ---
-
     #[test]
     fn remove_hides_a_lower_layer_file_from_stat_and_read_file() {
         let top = tempfile::tempdir().unwrap();
@@ -626,7 +469,6 @@ mod tests {
             resolver.stat("a.txt").unwrap_err().kind(),
             io::ErrorKind::NotFound
         );
-        // The lower layer's real file must be untouched — only hidden.
         assert!(bottom.path().join("a.txt").exists());
     }
 
@@ -680,7 +522,6 @@ mod tests {
             io::ErrorKind::NotFound,
             "a directory whiteout must hide everything beneath it, not just the directory entry itself"
         );
-        // The lower layer's real content must be untouched — only hidden.
         assert!(bottom.path().join("project/file.txt").exists());
     }
 

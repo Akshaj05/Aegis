@@ -1,15 +1,7 @@
 <script lang="ts">
-  // §31.2's layout: top bar, dominant terminal + right column (pipeline
-  // flow / approval panel), collapsible history strip. This component is
-  // the one place that subscribes to `transaction://event`/
-  // `terminal://output` and calls `api.*` — every child below only
-  // renders props and dispatches user-intent events (`submit`, `approve`,
-  // `reject`, …) back up here, matching docs/CLAUDE.md's "frontend is a
-  // pure renderer of the event stream" rule. `activeTransactionEvents`
-  // simply accumulates the raw event list for whichever transaction is
-  // "current" — `PipelineFlow` (§32) derives every node's state from
-  // that list on each recompute; this component does no stage-tracking
-  // of its own beyond collecting the events themselves.
+  // Root app component: owns session/transaction state, subscribes to
+  // IPC events, and wires the terminal, pipeline view, and side panels
+  // together.
   import { onMount } from "svelte";
   import Terminal from "./terminal/Terminal.svelte";
   import ApprovalPanel from "./transaction/ApprovalPanel.svelte";
@@ -67,7 +59,6 @@
     try {
       storageStatus = await api.getStorageStatus(sessionId);
     } catch {
-      // No checkpoints/session state yet — not an error worth surfacing.
     }
   }
 
@@ -77,15 +68,6 @@
     bannerMessage = null;
     try {
       await api.submitCommand(sessionId, line);
-      // Deliberately not setting `activeTransactionId` from this
-      // response: the Rust side emits every pipeline-stage event
-      // synchronously *inside* `submit_command`, all before it returns
-      // this ack, so by the time this `await` resolves every event for
-      // a fast (non-approval-gated) command has already arrived and
-      // would've been dropped waiting on this assignment. See
-      // `handleTransactionEvent`'s `RECEIVED`-stage branch below, which
-      // picks up the new transaction id the moment its first real event
-      // arrives instead.
     } catch (e) {
       terminalRef.writeSystemLine(String(e), "38;5;174");
       if (String(e).includes("quarantined")) {
@@ -102,9 +84,6 @@
   async function handleTransactionEvent(evt: import("./lib/types").TransactionEvent) {
     if (evt.session_id !== sessionId) return;
     if (evt.stage === "RECEIVED") {
-      // The first event of every transaction, always — start tracking
-      // it here rather than from `submit_command`'s own resolved
-      // promise (see `handleSubmit`'s comment for why that's too late).
       activeTransactionId = evt.transaction_id;
       activeTransactionEvents = [];
       viewingHistorical = false;
@@ -121,11 +100,6 @@
     if (evt.stage === "WAITING_FOR_APPROVAL" && evt.status === "started") {
       panelDetail = await api.getTransactionDetail(evt.transaction_id);
       panelKind = "approval";
-      // No `terminal://output` event fires until this transaction is
-      // approved/rejected and actually runs — without this, the terminal
-      // is left with no prompt and no indication anything happened,
-      // which reads as a hang even though the pipeline is correctly
-      // paused waiting on the panel to the right.
       terminalRef.writeSystemLine(
         "awaiting approval — see the panel on the right.",
         "38;5;173",
@@ -330,14 +304,6 @@
 </div>
 
 <style>
-  /* Design tokens — the single source of truth for the whole interface.
-     Custom properties cascade through the DOM regardless of Svelte's
-     per-component style scoping, so every component below just
-     references var(--...) rather than repeating hex values. Deliberately
-     no Tailwind here: the project has no existing Tailwind setup, and
-     introducing one is unrelated build-tooling churn a palette/spacing
-     pass doesn't need — scoped Svelte <style> already gives the same
-     "modular, component-owned CSS" property Tailwind would. */
   :global(html) {
     --bg: #0a0a0b;
     --bg-hover: #17171a;

@@ -1,39 +1,6 @@
-//! `Transaction` — one command's journey through §13's state machine.
-//! Every method here corresponds to exactly one legal edge in
-//! `state::TransactionState::legal_next_states`; there is no other way to
-//! change a `Transaction`'s state anywhere in this crate (§29.1: "Every
-//! state transition... emits an event, unconditionally, before the next
-//! stage begins").
-//!
-//! **Scope of this pass**: this module's methods accept the *outcome* of
-//! each pipeline stage as a parameter — a caller supplies "here is the
-//! `PolicyDecision`," "here is whether the AI was skipped," "here is the
-//! sealed `CheckpointId`," "here is the real `SimulationDiff` from
-//! `executor::execute`" — and this module's job is entirely about
-//! validating the transition, persisting it, and emitting the event, not
-//! about producing that outcome. That's a deliberate division matching
-//! the Build order's own phase boundaries: this is "Transaction manager +
-//! events," not "Simulation + diff," "Snapshot + rollback,"
-//! "Verification," or "AI planner." As of Build order phase 8, every
-//! stage but the AI planner (`ai/`, phase 9) supplies a real outcome —
-//! see `tests/verification_tolerance_tests/harness.rs` for the full
-//! pipeline driven end to end through these same methods. Nothing here
-//! needed to change shape to accommodate any of that, because the methods
-//! already took exactly the domain data those phases would produce.
-//!
-//! **A state-machine gap this module had to resolve, not invent**: §13.1's
-//! state list has no state for `Verdict::RejectUnsupported`
-//! (`policy::types`) — only `DENIED`, `REJECTED`, and `FAILED` exist as
-//! terminal non-success states. Mapping `RejectUnsupported` to `DENIED`
-//! would directly violate docs/CLAUDE.md invariant #3 ("UNSUPPORTED ≠
-//! DENIED... never conflate"). `FAILED`'s own definition ("pipeline
-//! failure before execution") fits "not implemented" reasonably, and
-//! staying distinct from `Denied` is the invariant that actually matters
-//! here — so `record_policy_rejected_unsupported` targets `Failed`, with
-//! its own distinct audit `event_type` (`policy_rejected_unsupported`, not
-//! `policy_denied`) so the audit trail still tells the two apart even
-//! though the state value is shared with other, unrelated `FAILED`
-//! causes.
+// `Transaction` — drives one command through the transaction state machine,
+// persisting each transition and emitting its event; the only way a
+// `Transaction`'s state changes anywhere in this crate.
 
 use chrono::Utc;
 use serde_json::Value as JsonValue;
@@ -74,10 +41,6 @@ pub enum TransactionError {
     IllegalTransition(#[from] state::IllegalTransitionError),
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
-    /// §27.4: a `ROLLBACK_FAILED` session accepts no further commands
-    /// until one of the two explicit quarantine recovery actions
-    /// (`rollback::quarantine_recovery_restore_to_newest`/
-    /// `..._reset_to_base`) runs.
     #[error("session {session_id} is quarantined following a rollback failure — no further commands are accepted until it is explicitly recovered")]
     SessionQuarantined { session_id: String },
 }
@@ -94,14 +57,6 @@ pub struct Transaction {
 }
 
 impl Transaction {
-    /// `RECEIVED`: "line submitted, transaction created" (§13.1). Inserts
-    /// the `transactions` row and emits the first event.
-    ///
-    /// Refuses outright — before inserting anything — if the session is
-    /// quarantined (§27.4). This is deliberately checked here rather than
-    /// left to fail some other way downstream: a quarantined session must
-    /// reject *every* command, including ones that would otherwise be
-    /// entirely safe, until an explicit recovery action runs.
     pub fn begin(
         db: &Database,
         sink: &mut dyn EventSink,
@@ -147,10 +102,6 @@ impl Transaction {
         self.state
     }
 
-    /// Validates and applies `from -> to`, persists the row's terminal
-    /// state if `to` is terminal, and emits the event. This is the
-    /// **only** place `self.state` is ever assigned — every public method
-    /// below goes through this.
     #[allow(clippy::too_many_arguments)]
     fn advance(
         &mut self,
@@ -162,18 +113,6 @@ impl Transaction {
         metrics: JsonValue,
     ) -> Result<(), TransactionError> {
         if let Err(e) = state::transition(self.state, to) {
-            // docs/CLAUDE.md: "an attempted illegal transition is a
-            // panic-level invariant violation in debug builds and a
-            // FAILED + loud audit event in release builds." `debug_assert!`
-            // panics here in debug (including `cargo test`'s default
-            // profile — exercised by this module's
-            // `#[should_panic]` test) and compiles to nothing in release,
-            // where execution falls through to the forced-FAILED path
-            // below instead. That release-mode fallback path is not
-            // exercised by this test suite (it needs a `--release` build
-            // with debug-assertions off, which this dev environment's
-            // default `cargo test` never produces) — stated plainly
-            // rather than silently assumed correct.
             debug_assert!(false, "illegal transaction state transition attempted: {e} — this is a logic defect, not a runtime condition");
             self.state = TransactionState::Failed;
             let _ = db.insert_audit_row(
@@ -252,8 +191,6 @@ impl Transaction {
         Ok(())
     }
 
-    // --- RECEIVED -> {PARSED, FAILED} ---
-
     pub fn record_parsed(
         &mut self,
         db: &Database,
@@ -286,13 +223,6 @@ impl Transaction {
         )
     }
 
-    // --- PARSED -> POLICY_CHECK -> {DENIED, FAILED (unsupported), AI_ANALYSIS} ---
-
-    /// Enters `POLICY_CHECK` and immediately routes based on `decision`,
-    /// per §20.1's evaluation order having already run by the time this
-    /// is called (the Policy Engine itself is stateless and doesn't need
-    /// the transaction's state machine to run — this method just records
-    /// what it already decided).
     pub fn record_policy_decision(
         &mut self,
         db: &Database,
@@ -318,12 +248,6 @@ impl Transaction {
             .collect();
         let reason_codes_json =
             serde_json::to_string(&reason_codes).unwrap_or_else(|_| "[]".to_string());
-        // `update_transaction_policy_fields` (`db::transaction_queries`)
-        // existed since Build order phase 5 and was never actually called
-        // here — a real, silent gap found and closed while wiring the
-        // adjacent `update_transaction_ai_fields` gap below for phase 9's
-        // AI data. `Category`/`SupportTier` gained `Display` impls for
-        // this (`policy::types`).
         db.update_transaction_policy_fields(
             &self.id.to_string(),
             decision.category.map(|c| c.to_string()).as_deref(),
@@ -350,9 +274,6 @@ impl Transaction {
                 )
             }
             Verdict::RejectUnsupported => {
-                // See this module's doc comment for why FAILED, not
-                // DENIED — and why the audit event_type is deliberately
-                // different from `policy_denied` regardless.
                 self.write_audit(
                     db,
                     "policy_rejected_unsupported",
@@ -371,26 +292,6 @@ impl Transaction {
         }
     }
 
-    // --- POLICY_CHECK -> AI_ANALYSIS -> SIMULATING (always, per §13.2) ---
-
-    /// Both edges fire unconditionally once policy allows proceeding —
-    /// "AI_ANALYSIS -> SIMULATING (always; AI failure sets flag, never
-    /// blocks)" (§13.2), which is exactly why this takes an
-    /// [`AiOutcome`] rather than a `Result`: §21.9's fallback ("proceed on
-    /// deterministic policy alone") isn't a special case this method
-    /// handles, it's the *only* thing `AiOutcome::Skipped` can mean by
-    /// construction (see that type's doc comment).
-    ///
-    /// As of Build order phase 9: `update_transaction_ai_fields`
-    /// (`db::transaction_queries`, existed since phase 5) is now actually
-    /// called — it was as silently unwired as
-    /// `update_transaction_policy_fields` was until this same pass fixed
-    /// both. A real `AiPlan` also gets persisted to `ai_plans`
-    /// (`db::ai_queries`) and checked for the one divergence that's
-    /// meaningful at this point in the pipeline: `escapes_sandbox`
-    /// (`ai::divergence::detect_escapes_sandbox_divergence`) — a finding
-    /// becomes an `ai_divergence` audit event, never anything that alters
-    /// routing (§28).
     pub fn record_ai_analysis_and_enter_simulation(
         &mut self,
         db: &Database,
@@ -423,10 +324,6 @@ impl Transaction {
                 .to_string()
             });
 
-            // `serde_json::to_value` renders the closed enum in its wire
-            // form (e.g. `"directory_create"`, not the Rust `Debug`
-            // spelling `DirectoryCreate`) — the same representation a
-            // real `AiPlan` arrived over the wire as.
             let intent_str = serde_json::to_value(plan.intent)
                 .ok()
                 .and_then(|v| v.as_str().map(str::to_string));
@@ -484,19 +381,6 @@ impl Transaction {
         )
     }
 
-    /// Convenience wrapper around
-    /// [`record_ai_analysis_and_enter_simulation`](Self::record_ai_analysis_and_enter_simulation)
-    /// for the common "AI wasn't consulted at all" case (disabled,
-    /// `NullBackend`, or a caller that hasn't wired a backend in yet).
-    /// Exists so that callers outside `transaction/` — concretely,
-    /// `executor/`'s own tests, which need to drive a `Transaction` up to
-    /// `EXECUTING` to obtain a real `ApprovedExecutionToken` — never need
-    /// to reference `crate::ai::backend::AiOutcome` themselves just to
-    /// pass the trivial no-AI case through. `executor/` must never depend
-    /// on `ai/` at all (docs/CLAUDE.md invariant #7, enforced by
-    /// `tests/policy_engine_tests`'s dependency scan) — this method is
-    /// what keeps that true while still letting its tests reach a state
-    /// only obtainable by passing through `AI_ANALYSIS`.
     pub fn skip_ai_analysis(
         &mut self,
         db: &Database,
@@ -511,8 +395,6 @@ impl Transaction {
             },
         )
     }
-
-    // --- SIMULATING -> {DIFF_READY, FAILED} ---
 
     pub fn record_simulation_complete(
         &mut self,
@@ -546,12 +428,6 @@ impl Transaction {
         )
     }
 
-    // --- DIFF_READY -> {WAITING_FOR_APPROVAL, SNAPSHOTTING} ---
-
-    /// §12's routing: "Policy final decision (recomputed): LOW -> proceed;
-    /// MED/HIGH/CRITICAL -> WAITING_FOR_APPROVAL." `requires_approval` is
-    /// the caller's already-recomputed answer (§20.6's pre-execution
-    /// re-validation), not decided by this method.
     pub fn record_diff_ready(
         &mut self,
         db: &Database,
@@ -579,8 +455,6 @@ impl Transaction {
         }
     }
 
-    // --- WAITING_FOR_APPROVAL -> {SNAPSHOTTING, REJECTED, FAILED} ---
-
     pub fn approve(
         &mut self,
         db: &Database,
@@ -598,10 +472,6 @@ impl Transaction {
         )
     }
 
-    /// §13.3: "REJECTED never modifies persistent state" — structurally
-    /// true because this is the only path to `Rejected`, and it's only
-    /// reachable from here, strictly before `SNAPSHOTTING` (the first
-    /// state that writes anything persistent).
     pub fn reject(
         &mut self,
         db: &Database,
@@ -619,8 +489,6 @@ impl Transaction {
         )
     }
 
-    /// §13.2: "FAILED on session teardown/timeout." §28: "Absence of
-    /// approval is never treated as approval."
     pub fn record_approval_timeout(
         &mut self,
         db: &Database,
@@ -636,21 +504,6 @@ impl Transaction {
         )
     }
 
-    // --- SNAPSHOTTING -> {EXECUTING, FAILED} ---
-
-    /// The **only** place in this crate an [`ApprovedExecutionToken`] can
-    /// be constructed (§13.3, §24) — enforced by `ApprovedExecutionToken::new`
-    /// being `pub(super)`, callable only from within `transaction/`.
-    ///
-    /// Inserts the `snapshots` row **before** setting
-    /// `transactions.pre_execution_checkpoint_id` (a foreign key into
-    /// `snapshots(id)`) — this exact ordering was gotten wrong once
-    /// already: an earlier version of this method set the foreign key
-    /// first, with no `snapshots` row existing yet at all, and hit a real
-    /// `FOREIGN KEY constraint failed` error in its own tests. Now that
-    /// `db::snapshot_queries` exists (Build order phase 7), the row can
-    /// actually be inserted here, in the right order, closing the gap
-    /// that method's doc comment used to describe as deferred.
     #[allow(clippy::too_many_arguments)]
     pub fn record_snapshot_sealed(
         &mut self,
@@ -699,8 +552,6 @@ impl Transaction {
         )
     }
 
-    // --- EXECUTING -> {VERIFYING, ROLLING_BACK} ---
-
     pub fn record_execution_complete(
         &mut self,
         db: &Database,
@@ -717,9 +568,6 @@ impl Transaction {
         )
     }
 
-    /// §28: "Execution failure (handler error, interrupt, unexpected
-    /// exit) -> ROLLING_BACK, because persistent state may be partially
-    /// modified."
     pub fn record_execution_failure(
         &mut self,
         db: &Database,
@@ -735,8 +583,6 @@ impl Transaction {
             JsonValue::Null,
         )
     }
-
-    // --- VERIFYING -> {COMMITTED, ROLLING_BACK} ---
 
     pub fn record_verification_result(
         &mut self,
@@ -772,8 +618,6 @@ impl Transaction {
         }
     }
 
-    // --- ROLLING_BACK -> {RESTORED, ROLLBACK_FAILED} ---
-
     pub fn record_rollback_result(
         &mut self,
         db: &Database,
@@ -791,14 +635,6 @@ impl Transaction {
                 JsonValue::Null,
             )
         } else {
-            // §13.3 / §27.4: "never silent" — an audit row, a terminal
-            // state, and now (Build order phase 7) real session
-            // quarantine: no further `Transaction::begin` on this
-            // `session_id` will succeed until an explicit recovery action
-            // (`rollback::quarantine_recovery_restore_to_newest`/
-            // `..._reset_to_base`) runs and something calls
-            // `Database::update_session_status` back to a non-quarantined
-            // value.
             let detail = detail.unwrap_or("rollback did not succeed");
             self.write_audit(
                 db,
@@ -1034,10 +870,8 @@ mod tests {
         txn.record_policy_decision(&db, &mut sink, &unsupported_decision())
             .unwrap();
 
-        // Distinct state value from a real Deny.
         assert_eq!(txn.state(), TransactionState::Failed);
 
-        // Distinct audit event_type, per this module's doc comment.
         let event_types: Vec<String> = db
             .raw_connection()
             .prepare("SELECT event_type FROM audit_log WHERE transaction_id = ?1")
@@ -1110,8 +944,6 @@ mod tests {
             "rollback failure must always write an audit row"
         );
 
-        // §27.4: quarantine — no further command on this session may
-        // begin a new transaction until it's explicitly recovered.
         assert_eq!(
             db.get_session_status("sess_1").unwrap(),
             Some("quarantined".to_string())
@@ -1154,7 +986,6 @@ mod tests {
         let db = seeded_db();
         let mut sink = CollectingEventSink::default();
         let mut txn = Transaction::begin(&db, &mut sink, "sess_1", "cmd_1", "ls").unwrap();
-        // RECEIVED -> EXECUTING is nowhere in the legal table.
         let _ = txn.advance(
             &db,
             &mut sink,

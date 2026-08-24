@@ -1,19 +1,5 @@
-//! SafeShell core library.
-//!
-//! Module layout mirrors `docs/architecture.md` §40. Implementation proceeds
-//! in the phase order defined in `docs/CLAUDE.md` ("Build order"); modules
-//! not yet reached by that order are present as stubs so the full shape of
-//! the system is visible from the start, per the architecture's module list.
-//!
-//! Dependency-direction invariants enforced by this crate (see
-//! `docs/CLAUDE.md` "Authority" #7): `policy`, `executor`, and `rollback`
-//! must never depend on `ai`. That rule is checked by the
-//! `policy_engine_tests` integration test (`tests/policy_engine_tests/main.rs`),
-//! which scans source text for forbidden `use` paths — a real
-//! compiler-enforced crate boundary would
-//! require splitting these into separate crates, which is a bigger
-//! restructuring than this phase calls for; the scan is the CI-enforced
-//! check the architecture asks for in the meantime.
+// SafeShell library crate root: declares and exposes the crate's module
+// tree (parser, policy, orchestrator, sandbox, snapshot, etc.).
 
 pub mod fs_abstraction;
 pub mod handlers;

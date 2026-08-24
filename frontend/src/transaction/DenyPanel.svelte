@@ -1,8 +1,5 @@
 <script lang="ts">
-  // §31.4: "A DENY renders differently from an approval prompt, because
-  // it is a different kind of thing." No approve control anywhere in
-  // this component, and no styling shared with `ApprovalPanel` — it must
-  // never be mistaken for a risk judgment the user could override.
+  // Deny panel: displays a denied transaction's policy reason codes.
   import type { TransactionDetail } from "../lib/types";
 
   export let detail: TransactionDetail;
@@ -38,9 +35,6 @@
 </section>
 
 <style>
-  /* A thin accent edge, not a boxed alert — still unmistakably distinct
-     from ApprovalPanel (which has none at all), without the heavy
-     full-bleed red card. */
   .panel {
     border-left: 2px solid var(--danger);
     padding-left: 1rem;

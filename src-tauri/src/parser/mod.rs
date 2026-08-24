@@ -1,25 +1,6 @@
-//! Hand-written recursive-descent parser for SafeShell's restricted command
-//! grammar. See `docs/architecture.md` §17.2.
-//!
-//! Supported: simple commands, arguments, quoting (`'...'`, `"..."`), `|`
-//! pipelines, `>`/`>>`/`<` redirection, `&&` and `;` sequencing, and
-//! environment variable expansion (`$VAR`, `${VAR}`) against a supplied env
-//! map.
-//!
-//! Explicitly unsupported and rejected with a specific diagnostic rather
-//! than silently mis-parsed: command substitution (`$(...)`, backticks),
-//! background jobs (`&`), here-documents (`<<`), process substitution
-//! (`<(...)`, `>(...)`), and unterminated quotes. A parse failure never
-//! falls back to a permissive interpretation and never falls back to
-//! passing the line to a shell (docs/CLAUDE.md invariant #15).
-//!
-//! Globbing beyond the supported-command grammar is explicitly **not**
-//! handled here: the architecture (§17.2) scopes basic `*` glob expansion
-//! to "the immediate directory," which is filesystem state the parser
-//! (which performs no I/O) cannot resolve. That expansion belongs to the
-//! handlers that accept path arguments, once they exist (Build order phase
-//! 1 handlers / phase 6 diff-aware handlers) — deferred, not guessed at
-//! here.
+// Hand-written recursive-descent parser for SafeShell's restricted shell
+// command grammar: simple commands, quoting, pipelines, redirection,
+// sequencing, and environment variable expansion.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -35,21 +16,18 @@ impl Arg {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RedirectionKind {
-    /// `>`
+
     Truncate,
-    /// `>>`
+
     Append,
-    /// `<`
+
     Input,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Redirection {
     pub kind: RedirectionKind,
-    /// The redirection target, as written. Structural sandbox-path
-    /// validation (rejecting `..`, etc.) happens where this is consumed
-    /// (`fs_abstraction::SandboxPath::parse`), not here — the parser does
-    /// not know the current working directory or perform I/O.
+
     pub target: String,
 }
 
@@ -63,16 +41,15 @@ pub struct ParsedCommand {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Connector {
-    /// `&&`
+
     And,
-    /// `;`
+
     Sequence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandLine {
-    /// Each entry is one pipeline plus the connector that followed it in
-    /// the input; the last entry's connector is `None`.
+
     pub segments: Vec<(ParsedCommand, Option<Connector>)>,
 }
 
@@ -97,9 +74,6 @@ pub enum ParseError {
     BadVariableSyntax(usize),
 }
 
-/// Parses one input line into a [`CommandLine`], expanding `$VAR`/`${VAR}`
-/// references against `env` as it tokenizes (unquoted and inside double
-/// quotes; single quotes suppress expansion, matching §17.2/§17.3).
 pub fn parse_line(input: &str, env: &HashMap<String, String>) -> Result<CommandLine, ParseError> {
     let tokens = tokenize(input, env)?;
     if tokens.is_empty() {
@@ -144,9 +118,6 @@ fn tokenize(input: &str, env: &HashMap<String, String>) -> Result<Vec<Token>, Pa
             continue;
         }
 
-        // Reject here-documents and process substitution before treating
-        // `<`/`>` as ordinary redirection, and reject backtick / $( )
-        // command substitution wherever it appears at the top level.
         if c == '<' && chars.get(i + 1) == Some(&'<') {
             return Err(ParseError::UnsupportedConstruct {
                 construct: "here-document (<<)",
@@ -216,9 +187,6 @@ fn tokenize(input: &str, env: &HashMap<String, String>) -> Result<Vec<Token>, Pa
     Ok(tokens)
 }
 
-/// Scans one whitespace/operator-delimited word starting at `chars[0]`,
-/// handling quoting and expansion. Returns the expanded word text and how
-/// many input chars were consumed.
 fn scan_word(chars: &[char], env: &HashMap<String, String>) -> Result<(String, usize), ParseError> {
     let mut out = String::new();
     let mut i = 0usize;
@@ -239,7 +207,7 @@ fn scan_word(chars: &[char], env: &HashMap<String, String>) -> Result<(String, u
                     i += 1;
                 }
                 out.push_str(&chars[start..i].iter().collect::<String>());
-                i += 1; // closing quote
+                i += 1;
             }
             '"' => {
                 i += 1;
@@ -287,7 +255,7 @@ fn scan_word(chars: &[char], env: &HashMap<String, String>) -> Result<(String, u
                         i += 2;
                     }
                     None => {
-                        // Trailing backslash with nothing to escape.
+
                         out.push('\\');
                         i += 1;
                     }
@@ -312,9 +280,6 @@ fn is_word_boundary(c: char) -> bool {
     c.is_whitespace() || matches!(c, '|' | '>' | '<' | ';' | '&')
 }
 
-/// Expands `$VAR` or `${VAR}` starting at `chars[0]` (which must be `$`).
-/// An unrecognized/empty variable name expands to the empty string, matching
-/// ordinary shell behavior for unset variables — this is not an error case.
 fn expand_variable(
     chars: &[char],
     env: &HashMap<String, String>,
@@ -342,8 +307,7 @@ fn expand_variable(
             }
         }
         if j == 1 {
-            // Bare `$` with no valid identifier following: treat literally,
-            // as real shells do.
+
             return Ok(("$".to_string(), 1));
         }
         let name: String = chars[1..j].iter().collect();
@@ -370,7 +334,7 @@ fn build_command_line(tokens: &[Token]) -> Result<CommandLine, ParseError> {
     }
 
     if start > tokens.len() {
-        // Unreachable given the loop above, kept for clarity of invariant.
+
         unreachable!();
     }
     if start == tokens.len() {
@@ -390,7 +354,6 @@ fn build_command_line(tokens: &[Token]) -> Result<CommandLine, ParseError> {
     Ok(CommandLine { segments })
 }
 
-/// Builds one `|`-chained pipeline from a connector-free token slice.
 fn build_pipeline(tokens: &[Token]) -> Result<ParsedCommand, ParseError> {
     let stages: Vec<&[Token]> = split_on_pipe(tokens);
     if stages.is_empty() {

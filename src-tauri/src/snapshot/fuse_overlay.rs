@@ -1,22 +1,6 @@
-//! `FuseOverlaySimulationBackend` — the MVP fallback `SimulationBackend`
-//! (§14.4), used when the preflight self-test shows kernel OverlayFS
-//! doesn't work on this system. Invokes the external `fuse-overlayfs`
-//! binary via `std::process::Command` with an explicit argument array —
-//! never a shell string (§19.4/docs/CLAUDE.md invariant #15).
-//!
-//! **Unverified in this pass**, more fundamentally than `overlayfs.rs`:
-//! the `fuse-overlayfs` binary itself isn't installed in this project's
-//! development environment (`which fuse-overlayfs` finds nothing), even
-//! though `/dev/fuse` exists and `fusermount3` is present. [`self_test`]
-//! detects and reports that absence accurately — a real, correct result,
-//! just not the one that exercises the actual mount logic. Everything
-//! past "the binary exists and ran" is unverified here, same caveat as
-//! `overlayfs.rs`.
-//!
-//! Lifecycle methods (seal/discard/restore/size) are, again, identical
-//! directory operations to `copyup.rs`/`overlayfs.rs` — see
-//! `overlayfs.rs`'s doc comment for why that duplication is accepted for
-//! now rather than factored out.
+// `SimulationBackend` implementation backed by the external `fuse-overlayfs`
+// binary, invoked via `std::process::Command` with an explicit argument
+// array (never a shell string).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -167,12 +151,6 @@ impl SimulationBackend for FuseOverlaySimulationBackend {
     }
 }
 
-/// Checks whether `fuse-overlayfs` is even runnable — `--help` is a
-/// side-effect-free way to confirm the binary exists and executes without
-/// attempting a real mount (which would additionally need a scratch lower/
-/// upper/work/mountpoint set, `/dev/fuse` access, and `fusermount3`'s
-/// setuid-helper permission, all separate failure modes this narrower
-/// check deliberately doesn't conflate together).
 pub fn self_test() -> PrimitiveStatus {
     match Command::new("fuse-overlayfs").arg("--help").output() {
         Ok(output) if output.status.success() => PrimitiveStatus::Ok,

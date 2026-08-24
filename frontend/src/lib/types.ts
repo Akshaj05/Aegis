@@ -1,16 +1,5 @@
-// TS types mirroring the Rust IPC/event structs. docs/CLAUDE.md: "TS types
-// in `frontend/src/lib/` mirror the Rust IPC structs; update both together
-// in one change." Sources:
-//   - `src-tauri/src/transaction/events.rs` (`TransactionEvent::to_json`) — §29.2
-//   - `src-tauri/src/orchestrator/mod.rs` (`TerminalOutputEvent`, `TransactionDetail`,
-//     `AiPlanDetail`, `VerificationDetail`, `DenyReasonDetail`, `StorageStatus`,
-//     `capability_report_to_json`) — Build order phase 10
-//   - `src-tauri/src/db/transaction_queries.rs` (`TransactionEventRow`,
-//     `TransactionSummaryRow`, `ExecutionResultRow`) — §34
-//   - `src-tauri/src/db/session_queries.rs` (`SessionRow`) — §34
-//   - `src-tauri/src/ipc/mod.rs` (`Ack`, `SubmitCommandResponse`, `RollbackResponse`) — §41
-
-/** §13.1's seventeen states, exactly as `TransactionState`'s `Display` renders them. */
+// TypeScript type definitions mirroring the backend IPC/event payloads
+// used throughout the frontend.
 export type TransactionStage =
   | "RECEIVED"
   | "PARSED"
@@ -43,7 +32,6 @@ export type EventStatus = "started" | "in_progress" | "completed" | "failed";
 export type Category = "safe" | "dangerous_containable" | "unsafe_to_contain";
 export type RiskLevel = "low" | "medium" | "high" | "critical";
 
-/** §29.2's event schema, emitted as `transaction://event`. */
 export interface TransactionEvent {
   transaction_id: string;
   session_id: string;
@@ -59,7 +47,6 @@ export interface TransactionEvent {
   sequence: number;
 }
 
-/** The second channel §29.2 names, emitted as `terminal://output`. */
 export interface TerminalOutputEvent {
   session_id: string;
   transaction_id: string;
@@ -196,19 +183,11 @@ export interface RollbackResponse {
   reason: string | null;
 }
 
-/** From the predicted-diff event's `metrics` payload (see `orchestrator::submit_command`'s
- * `record_simulation_complete` call). */
 export function extractPredictedDiff(event: TransactionEvent): PredictedDiff | null {
   const metrics = event.metrics as { predicted_diff?: PredictedDiff } | null;
   return metrics?.predicted_diff ?? null;
 }
 
-/** The minimal shape `visualization/PipelineFlow.svelte` needs — satisfied
- * by both a live `TransactionEvent` (from `transaction://event`) and a
- * persisted `TransactionEventRow` (from `TransactionDetail.events`), so
- * the same component renders a live-in-progress transaction and a
- * reopened historical one identically, per §32's "state-driven, not
- * scripted" requirement. */
 export interface FlowEvent {
   stage: string;
   status: string;
@@ -223,11 +202,6 @@ export function detailEventsToFlowEvents(detail: TransactionDetail): FlowEvent[]
   }));
 }
 
-/** Same extraction, from a persisted `TransactionDetail.events` row
- * (`metrics_json` is a string there, not a parsed object — it travels
- * through SQLite as text). Lets the approval panel work whether it was
- * opened from the live `transaction://event` stream or from
- * `get_transaction_detail` after a page reload. */
 export function extractPredictedDiffFromDetail(detail: TransactionDetail): PredictedDiff | null {
   const diffReady = detail.events.find((e) => e.stage === "DIFF_READY");
   if (!diffReady?.metrics_json) return null;

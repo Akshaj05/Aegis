@@ -1,18 +1,5 @@
-//! Filesystem-structural commands (`rmdir`, `cp`, `mv`, `chmod`, `chown`,
-//! `find`, `du`, `df`, `truncate`, `shred`) that need real path
-//! traversal/mutation rather than pure byte transformation.
-//!
-//! These **cannot** be delegated to uutils' own `uu_cp`/`uu_mv`/etc. crates
-//! — those call `std::fs`/libc directly against real OS paths, with no way
-//! to redirect that through [`LayeredResolver`]'s `openat2`+
-//! `RESOLVE_BENEATH` containment or its layered/whiteout read-through-stack
-//! model (see `handlers/mod.rs`'s module doc for the fuller argument).
-//! Every path-touching operation here goes through `LayeredResolver`
-//! exclusively, same as the handlers in `mod.rs` — this module just adds
-//! more of them, following the same pattern (`cmd_rm` for deletion,
-//! `cmd_mkdir`/`cmd_touch` for the copy-up-aware creation logic that
-//! [`copy_into`] and `chmod`/`chown`'s "ensure a real top-layer copy first"
-//! step both build on).
+// Filesystem-structural command handlers: rmdir, cp, mv, chmod, chown,
+// find, du, df, truncate, and shred.
 
 use std::io;
 
@@ -38,11 +25,6 @@ fn short_flags(args: &[Arg]) -> (Vec<char>, Vec<&str>) {
     (flags, operands)
 }
 
-/// `rmdir DIR...`: refuses a non-empty directory (real `rmdir`'s
-/// `ENOTEMPTY`), checked explicitly here rather than relying on
-/// `LayeredResolver::remove`'s own recursion (which would happily remove
-/// non-empty content — that's what `-r` is for, and `rmdir` never takes
-/// one).
 pub fn cmd_rmdir(
     session: &TerminalSession,
     resolver: &LayeredResolver,
@@ -101,10 +83,6 @@ pub fn cmd_rmdir(
             }
             Ok(_) => {}
         }
-        // Already proven empty above; `remove`'s own directory check just
-        // needs `recursive = true` to be allowed to touch a directory at
-        // all (§ handlers/mod.rs's `cmd_rm` doc — same gate, no actual
-        // recursion happens against an empty directory).
         if let Err(e) = resolver.remove(parent.as_str(), name, true) {
             stderr.push_str(&format!("rmdir: failed to remove '{raw}': {e}\n"));
             exit_code = 1;
@@ -162,10 +140,6 @@ fn copy_into(
     }
 }
 
-/// Resolves the usual `cmd SRC... DEST` shape shared by `cp`/`mv`: the last
-/// operand is the destination; if more than one source is given, the
-/// destination must already be a directory (real `cp`/`mv`'s
-/// `ENOTDIR`-shaped usage error otherwise).
 fn resolve_sources_and_dest<'a>(
     session: &TerminalSession,
     operands: &[&'a str],
@@ -180,7 +154,6 @@ fn resolve_sources_and_dest<'a>(
     Ok((sources, dest, multi))
 }
 
-/// `cp [-r|-R] SRC... DEST`.
 pub fn cmd_cp(
     session: &TerminalSession,
     resolver: &LayeredResolver,
@@ -248,14 +221,6 @@ pub fn cmd_cp(
     }
 }
 
-/// `mv SRC... DEST`, implemented as copy-then-remove against the *same*
-/// `LayeredResolver` primitives `cp`/`rm` already use, rather than a new
-/// cross-layer rename primitive — real `mv`'s atomic-rename fast path is a
-/// same-filesystem optimization with no observable difference here (only
-/// the final layered/verified state matters to SafeShell's diff/
-/// verification machinery, never the syscall sequence that produced it).
-/// Always copies recursively when the source is a directory — unlike
-/// `cp`, `mv` has no `-r` flag; moving a directory is always allowed.
 pub fn cmd_mv(
     session: &TerminalSession,
     resolver: &LayeredResolver,
@@ -334,10 +299,6 @@ pub fn cmd_mv(
     }
 }
 
-/// `chmod MODE FILE...` — octal modes only (e.g. `755`, `644`); real
-/// `chmod`'s symbolic form (`u+x`, `go-w`, ...) is not implemented (a
-/// documented divergence, not a security gap). `-R` recurses into
-/// directories.
 pub fn cmd_chmod(
     session: &TerminalSession,
     resolver: &LayeredResolver,
@@ -402,11 +363,6 @@ fn chmod_recursive(
     Ok(())
 }
 
-/// `chown OWNER[:GROUP] FILE...` — numeric UID[:GID] only; SafeShell has no
-/// simulated user/group database to resolve a symbolic name against (a
-/// documented divergence). A rootless process can only ever `chown` to its
-/// own uid — attempting any other target surfaces the real `EPERM`, not a
-/// SafeShell-specific restriction. `-R` recurses into directories.
 pub fn cmd_chown(
     session: &TerminalSession,
     resolver: &LayeredResolver,
@@ -497,11 +453,6 @@ fn chown_recursive(
     Ok(())
 }
 
-/// `find [PATH] [-name PATTERN] [-type f|d]` — a deliberate subset of real
-/// `find`'s predicate language (documented in
-/// `policies/supported_commands.toml`'s `partially_supported.divergences`).
-/// `PATTERN` uses the same `*`-only glob syntax as `rm`'s (see
-/// `handlers/mod.rs::glob_match`).
 pub fn cmd_find(
     session: &TerminalSession,
     resolver: &LayeredResolver,
@@ -599,10 +550,6 @@ fn du_walk(resolver: &LayeredResolver, path: &SandboxPath) -> io::Result<u64> {
     Ok(total)
 }
 
-/// `du [-s] PATH...` — always reports a single recursive total per target
-/// (i.e. always behaves as if `-s` were given); real `du`'s default
-/// per-subdirectory breakdown is not implemented (documented divergence,
-/// not a security gap — the aggregate byte count is exact either way).
 pub fn cmd_du(
     session: &TerminalSession,
     resolver: &LayeredResolver,
@@ -643,15 +590,6 @@ pub fn cmd_du(
     }
 }
 
-/// `df` — SafeShell has no real mounted filesystem/device backing the
-/// simulated tree to report block-device statistics for (the copy-up
-/// backend is plain host directories; even OverlayFS mode has no
-/// meaningful separate capacity of its own). Rather than fabricate a
-/// capacity/available number SafeShell doesn't actually know (§25:
-/// "never claim... perfect simulation"), this reports only the one real,
-/// derivable number — total bytes used across the whole simulated tree —
-/// against a single synthetic `safeshell-sim` entry, with capacity/
-/// available/use% explicitly marked unknown (`-`) rather than invented.
 pub fn cmd_df(resolver: &LayeredResolver) -> CommandResult {
     let used = du_walk(resolver, &SandboxPath::root()).unwrap_or(0);
     let stdout = format!(
@@ -661,13 +599,6 @@ pub fn cmd_df(resolver: &LayeredResolver) -> CommandResult {
     CommandResult::ok(stdout)
 }
 
-/// `truncate -s SIZE FILE...` — resizes a file to exactly `SIZE` bytes,
-/// zero-padding if growing, discarding trailing content if shrinking
-/// (real `truncate`'s core behavior; `+`/`-`/`%`-relative size
-/// adjustments and `-c`/`--no-create` are not implemented — a documented
-/// subset, same posture as this module's other partial commands). A
-/// target that doesn't exist yet is created (matching real `truncate`'s
-/// default, which is *not* `-c`).
 pub fn cmd_truncate(
     session: &TerminalSession,
     resolver: &LayeredResolver,
@@ -725,12 +656,6 @@ pub fn cmd_truncate(
     }
 }
 
-/// `shred [-u] FILE...` — overwrites a file's existing content in place
-/// (one pass of zero bytes; real GNU `shred`'s multiple random-data
-/// passes are not reproduced — the destructive *intent* this command
-/// exists to express, which is what `policy::risk` classifies on, is
-/// fully preserved either way). `-u` additionally removes the file after
-/// overwriting, matching real `shred -u`.
 pub fn cmd_shred(
     session: &TerminalSession,
     resolver: &LayeredResolver,
@@ -860,7 +785,6 @@ mod tests {
             run("cat", &["d/b.txt"], &mut session, &resolver),
             CommandResult::ok("hello\n")
         );
-        // original still exists — cp, not mv
         assert_eq!(
             run("cat", &["d/a.txt"], &mut session, &resolver),
             CommandResult::ok("hello\n")
@@ -990,7 +914,6 @@ mod tests {
         let (_tmp, resolver) = resolver();
         run("touch", &["a.txt"], &mut session, &resolver);
         if nix::unistd::getuid().is_root() {
-            // Root can chown to anyone; this test only proves rootless EPERM.
             return;
         }
         let other_uid = nix::unistd::getuid().as_raw() + 1;
@@ -1038,7 +961,7 @@ mod tests {
 
         let r = run("du", &["d"], &mut session, &resolver);
         assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
-        assert!(r.stdout.contains('6')); // "hello\n" is 6 bytes
+        assert!(r.stdout.contains('6'));
     }
 
     #[test]

@@ -1,8 +1,5 @@
-//! Translates a `WorkerRequest` into `RootResolver` calls and builds the
-//! matching `WorkerResponse`. Kept separate from `resolver.rs` (which
-//! knows nothing about the wire protocol) and from `mod.rs`'s request loop
-//! (which knows nothing about individual operations), so each can be
-//! tested independently.
+// Translates a WorkerRequest into RootResolver calls and builds the
+// matching WorkerResponse.
 
 use crate::sandbox::worker::protocol::{WorkerRequest, WorkerResponse};
 use crate::sandbox::worker::resolver::RootResolver;

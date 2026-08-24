@@ -1,6 +1,5 @@
-// Small, shared display-only helpers. Every mapping here is cosmetic
-// (label text, badge color) — none of it re-derives a security decision;
-// the decision (category/risk/verdict) always comes from the Rust core.
+// Shared display-formatting helpers: labels, tones, byte/timestamp
+// formatting used across components.
 export function categoryLabel(category: string | null): string {
   switch (category) {
     case "safe":

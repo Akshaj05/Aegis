@@ -1,22 +1,6 @@
-//! Verification Engine: re-runs the same diff computation used during
-//! simulation (§22.3) against the actual post-execution state and
-//! compares it to the prediction (§26.1). Match within tolerance →
-//! `COMMITTED`; meaningful mismatch → `ROLLING_BACK` (§26.2/§26.3).
-//!
-//! **Honest scope**: §26.2 lists seven mismatch conditions. Given
-//! `handlers/mod.rs`'s current command set (`pwd, cd, mkdir, touch, ls,
-//! cat, echo, rm`) — same set `simulation::diff`'s own module doc already
-//! scopes — permission/ownership changes, symlinks, and process effects
-//! never occur in any diff this crate can currently produce, so the
-//! mismatch conditions built on them (`permission_changes`,
-//! `ownership_changes`, `symlink_changes`, sandbox-local process
-//! start/stop) are structurally unreachable right now rather than
-//! silently unimplemented: [`Mismatch`] simply has no variant for them
-//! yet, and this module's tests only exercise what current handlers can
-//! actually produce — path presence/absence (including deletion),
-//! content-hash divergence, and exit-code class. The remaining ones
-//! become real the moment `chmod`/`chown`/`ln` handlers exist and
-//! `SimulationDiff` grows the corresponding fields.
+// Verification engine: compares the predicted (simulated) diff against the
+// actual post-execution diff and reports whether they match within
+// tolerance, deciding between COMMITTED and ROLLING_BACK.
 
 pub mod tolerance;
 
@@ -47,25 +31,11 @@ impl std::fmt::Display for ChangeKind {
     }
 }
 
-/// One instance of a §26.2 meaningful-mismatch condition. `Display`
-/// renders the human-readable detail that feeds
-/// `transaction::manager::Transaction::record_verification_result`'s
-/// `mismatch_detail` parameter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mismatch {
-    /// "A path was created, modified, or deleted in actual but not
-    /// predicted" (§26.2).
     UnexpectedChange { path: String, kind: ChangeKind },
-    /// "A path was predicted to be created, modified, or deleted but was
-    /// not" (§26.2).
     PredictedChangeMissing { path: String, kind: ChangeKind },
-    /// "Content hash differs for a modified file not on the declared
-    /// nondeterminism allowlist" (§26.2). Only raised for paths present
-    /// in *both* diffs as created-or-modified — a path missing from one
-    /// side entirely is an `UnexpectedChange`/`PredictedChangeMissing`
-    /// instead, not this.
     ContentHashDiffers { path: String },
-    /// "Exit code class differs (success vs failure)" (§26.2).
     ExitCodeClassDiffers {
         predicted_success: bool,
         actual_success: bool,
@@ -112,9 +82,6 @@ pub struct VerificationResult {
 }
 
 impl VerificationResult {
-    /// Joins every mismatch's `Display` into one string — the
-    /// `mismatch_detail` `record_verification_result` expects, `None` when
-    /// there is nothing to report.
     pub fn detail(&self) -> Option<String> {
         if self.mismatches.is_empty() {
             None
@@ -130,10 +97,6 @@ impl VerificationResult {
     }
 }
 
-/// §26.1's comparison. `predicted_diff`/`predicted_exit_code` come from
-/// `simulation::manager::simulate`'s `SimulationOutcome`; `actual_diff`/
-/// `actual_exit_code` come from `executor`'s equivalent. `allowlist` is
-/// §26.3's declared nondeterminism allowlist.
 pub fn verify(
     predicted_diff: &SimulationDiff,
     predicted_exit_code: i32,
@@ -174,11 +137,6 @@ pub fn verify(
         &mut mismatches,
     );
 
-    // Content-hash check: only for paths both sides agree were
-    // created-or-modified (a presence disagreement was already reported
-    // above by compare_path_sets, and reporting it again here as a hash
-    // mismatch too would be redundant noise about the same underlying
-    // fact).
     let predicted_touched = touched_paths(predicted_diff);
     let actual_touched = touched_paths(actual_diff);
     for path in predicted_touched.intersection(&actual_touched) {
@@ -258,8 +216,6 @@ mod tests {
             ..Default::default()
         }
     }
-
-    // --- §26.2 meaningful mismatches ---
 
     #[test]
     fn identical_predicted_and_actual_diffs_match() {
@@ -389,8 +345,6 @@ mod tests {
         );
     }
 
-    // --- §26.3 tolerated differences ---
-
     #[test]
     fn content_hash_differing_on_an_allowlisted_path_is_tolerated() {
         let mut predicted = diff_with(&[], &["var/log/mock.log"], &[]);
@@ -429,9 +383,6 @@ mod tests {
 
     #[test]
     fn directory_entry_ordering_is_not_compared_at_all() {
-        // compare_path_sets is set-based, not order-based — construct the
-        // same paths in different Vec order on each side and confirm that
-        // alone never produces a mismatch.
         let predicted = diff_with(&["b.txt", "a.txt"], &[], &[]);
         let actual = diff_with(&["a.txt", "b.txt"], &[], &[]);
         let result = verify(&predicted, 0, &actual, 0, &NondeterminismAllowlist::empty());

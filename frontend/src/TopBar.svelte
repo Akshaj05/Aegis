@@ -1,7 +1,6 @@
 <script lang="ts">
-  // §31.2's top bar: "environment indicator | session id | sandbox
-  // backend | capability status | storage: 412 MB / 1 GB, 7/10
-  // checkpoints."
+  // Top status bar: shows session id, sandbox backend, capability
+  // status, and storage usage.
   import type { CapabilityReport, StorageStatus } from "./lib/types";
   import { formatBytes } from "./lib/format";
 

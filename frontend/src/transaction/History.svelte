@@ -1,5 +1,5 @@
 <script lang="ts">
-  // §31.2's bottom strip: "transaction history + recoverability."
+  // History strip: lists past transactions and exposes undo-last-transaction.
   import { createEventDispatcher } from "svelte";
   import type { TransactionSummaryRow } from "../lib/types";
   import { categoryTone, formatTimestamp } from "../lib/format";
@@ -34,9 +34,6 @@
       <span class="chevron" class:collapsed>▾</span>
       <h3>History <span class="count">{items.length}</span></h3>
     </button>
-    <!-- §44 step 4: "Undo Last Transaction." §23.5 is strictly LIFO — there
-         is exactly one valid target, computed by the core, which is why
-         this control needs no argument beyond the session id. -->
     <button
       class="undo"
       disabled={undoBusy}
@@ -68,9 +65,6 @@
 </section>
 
 <style>
-  /* No dividing border — a faint background/foreground tonal shift
-     (barely a shade lighter than the app background) is enough to read
-     as "a different region" without a hard line. */
   .history {
     background: var(--bg-inset);
   }

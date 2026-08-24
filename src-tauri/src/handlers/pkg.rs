@@ -1,26 +1,5 @@
-//! `safeshell-pkg {list|install|remove}` — SafeShell's mock package
-//! manager. `policies/supported_commands.toml` already declared this
-//! command's divergence ("Operates against local metadata fixtures only;
-//! no network installation.") long before any handler existed; this
-//! module is that handler.
-//!
-//! State lives on [`TerminalSession::packages`], seeded once per session
-//! from `simulated-root-image/mock-package-db.json`
-//! (`orchestrator::create_session`) and mutated in-memory only — there is
-//! no real on-disk package format to install/remove, matching the "mock"
-//! framing the seed file's own `_comment` field already used. Because
-//! it's session state rather than simulated filesystem content, a
-//! `safeshell-pkg` transaction's predicted/actual diff is always empty —
-//! expected, not a bug: the diff engine (`simulation::diff`) only tracks
-//! filesystem changes, and this command makes none.
-//!
-//! `remove`'s destructiveness is enforced entirely by `policy::risk`
-//! (§20.4's toolchain-critical-package escalation to High, plus the
-//! blanket "partially-supported divergence -> at least Medium" rule every
-//! `safeshell-pkg` invocation gets regardless of subcommand) — this
-//! handler itself never refuses removing an essential package
-//! (`DANGEROUS != DENIED`, docs/CLAUDE.md invariant #1); it just reports
-//! plainly what it did.
+// Handler for the mock `safeshell-pkg` package manager command
+// (list/install/remove against in-memory session package state).
 
 use crate::mock_packages::MockPackage;
 use crate::parser::Arg;
@@ -165,8 +144,6 @@ mod tests {
 
     #[test]
     fn remove_still_succeeds_for_an_essential_package_and_says_so() {
-        // DANGEROUS != DENIED (invariant #1): the handler never refuses
-        // this — policy risk classification is what gates it.
         let mut session = session_with(vec![pkg("safeshell-toolchain", true)]);
         let (_tmp, resolver) = resolver();
         let r = dispatch(

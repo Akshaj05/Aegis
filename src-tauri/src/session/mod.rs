@@ -1,16 +1,5 @@
-//! Per-tab terminal session state: cwd, environment, history. See
-//! `docs/architecture.md` §17.1, §17.3.
-//!
-//! This module owns no filesystem I/O and no sandbox handle yet — `handlers/`
-//! runs against a [`crate::simulation::resolver::LayeredResolver`] built
-//! per-command from the session's layer stack, not stored on
-//! `TerminalSession` itself. `TerminalSession` still needs extending with
-//! the session's real sandbox handle and persistent layer stack (today
-//! there is no `Session`-level owner of a `snapshot::backend::LayerStack`
-//! — each simulation pass in `simulation::manager` currently takes one as
-//! a parameter rather than a session owning one long-term), once the
-//! Transaction Manager (Build order phase 5, done) is wired end-to-end
-//! with a real session lifecycle rather than exercised directly in tests.
+// Per-tab terminal session state: current working directory,
+// environment variables, and command history.
 
 use std::collections::HashMap;
 
@@ -47,20 +36,10 @@ pub struct TerminalSession {
     env: HashMap<String, String>,
     history: Vec<String>,
     pub last_exit_status: i32,
-    /// The session's mock package list — `handlers::pkg`'s `safeshell-pkg`
-    /// state. Seeded once at session creation from
-    /// `simulated-root-image/mock-package-db.json`
-    /// (`orchestrator::create_session`), then mutated only by real
-    /// execution, never by simulation — `orchestrator::submit_command`
-    /// clones the whole `TerminalSession` for its simulation pass (see
-    /// that module's doc comment on why `cd`'s `cwd` mutation needed the
-    /// same treatment), so this field inherits that isolation for free.
     pub packages: Vec<MockPackage>,
 }
 
 impl TerminalSession {
-    /// Seeds realistic default environment variables per §17.3
-    /// (`HOME`, `USER`, `SHELL`, `LANG`, `PWD`).
     pub fn new() -> Self {
         let mut env = HashMap::new();
         env.insert("HOME".to_string(), "/home/user".to_string());
@@ -68,9 +47,6 @@ impl TerminalSession {
         env.insert("SHELL".to_string(), "/bin/safeshell".to_string());
         env.insert("LANG".to_string(), "en_US.UTF-8".to_string());
         env.insert("PWD".to_string(), "/".to_string());
-        // PATH exists for realism (`echo $PATH`, `which`) — it does not
-        // drive command dispatch (§17.3); dispatch is a typed name->handler
-        // map built in `handlers/`.
         env.insert("PATH".to_string(), "/usr/bin:/bin".to_string());
 
         TerminalSession {
@@ -87,10 +63,6 @@ impl TerminalSession {
         &self.cwd
     }
 
-    /// Sets the session's current directory. Callers (the `cd` handler) are
-    /// responsible for validating the target exists and is a directory
-    /// before calling this — this method only updates session state and
-    /// keeps `PWD` consistent with `cwd`, matching real shell behavior.
     pub fn set_cwd(&mut self, path: SandboxPath) {
         self.env.insert("PWD".to_string(), path.to_string());
         self.cwd = path;

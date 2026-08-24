@@ -1,24 +1,5 @@
-//! SQLite schema, connection management, and the typed query layer for
-//! tables this phase actually produces data for. See
-//! `docs/architecture.md` §34.
-//!
-//! Every table from §34's schema is created here — `initialize_schema`
-//! matches that section exactly, table for table, column for column — so
-//! later phases never need a migration to add a table the architecture
-//! already specified. `sessions`, `commands`, `transactions`,
-//! `transaction_events`, and `audit_log` (Build order phase 5),
-//! `snapshots` (phase 7), and now `ai_plans` (phase 9, `ai_queries.rs`)
-//! have typed Rust methods on [`Database`]. `execution_results`,
-//! `verification_results`, `rollback_events`, and `terminal_history` still
-//! don't — writing query methods for data nothing persists yet would be
-//! untested, unused code; they get their typed API once something in this
-//! crate actually needs to write a row there.
-//!
-//! `rusqlite` with the `bundled` feature (vendors SQLite's C source and
-//! compiles it) rather than linking a system `libsqlite3` — this dev
-//! environment's set of installed system packages is exactly the kind of
-//! thing earlier phases (the Tauri `gui` feature, `fuse-overlayfs`) have
-//! already found gaps in; bundling avoids adding SQLite to that list.
+// SQLite schema definition and connection management for the application
+// database, plus module wiring for the typed query submodules.
 
 use std::path::Path;
 
@@ -34,7 +15,6 @@ impl Database {
         Self::from_connection(conn)
     }
 
-    /// For tests, and for any future short-lived or throwaway session.
     pub fn open_in_memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;
         Self::from_connection(conn)
@@ -47,9 +27,6 @@ impl Database {
         Ok(db)
     }
 
-    /// Idempotent: every statement is `CREATE TABLE IF NOT EXISTS`, so
-    /// opening an existing database file re-runs this harmlessly instead
-    /// of needing a separate "has this been initialized" check.
     fn initialize_schema(&self) -> rusqlite::Result<()> {
         self.conn.execute_batch(SCHEMA_SQL)
     }
@@ -230,8 +207,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("safeshell.db");
         Database::open(&path).unwrap();
-        // Re-opening the same file must not error on the CREATE TABLE
-        // statements already having run.
         Database::open(&path).unwrap();
     }
 }

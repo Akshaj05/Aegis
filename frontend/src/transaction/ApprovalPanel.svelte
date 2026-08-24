@@ -1,11 +1,6 @@
 <script lang="ts">
-  // §31.3: "the product's most important screen... presents facts, not
-  // discouragement." Approve/Reject are rendered as equals — see the
-  // stylesheet below: identical size and prominence for both actions,
-  // deliberately (a filled/ghost pairing reads as "primary vs.
-  // secondary" by convention, but neither is harder to reach or slower
-  // to click — that's the equality that matters here, not identical
-  // paint).
+  // Approval panel: shows predicted diff, classification, and AI
+  // advisory for a transaction awaiting approve/reject.
   import { createEventDispatcher } from "svelte";
   import type { TransactionDetail } from "../lib/types";
   import { extractPredictedDiffFromDetail } from "../lib/types";
@@ -120,9 +115,6 @@
 </section>
 
 <style>
-  /* Deliberately no outer card: no background, no border, no radius —
-     the panel breathes against the app background, and structure comes
-     entirely from spacing + the eyebrow/heading typographic hierarchy. */
   .panel {
     display: flex;
     flex-direction: column;
@@ -180,9 +172,6 @@
     line-height: 1.5;
   }
 
-  /* "What will change" — read like a structured log, not a form widget:
-     a fixed, right-aligned numeric column feeding into a muted label,
-     no bullets, no card background. */
   .stats {
     margin: 0;
     display: flex;

@@ -1,17 +1,6 @@
 <script lang="ts">
-  // §32: "A fixed SVG diagram of the pipeline stages... on each
-  // `transaction://event`, the corresponding node updates: idle → active
-  // → done or error, with a duration label once `duration_ms` is known...
-  // state-driven, not scripted." This component takes the *full* ordered
-  // event list for one transaction and derives every node's status from
-  // it on each recompute — there is no internal timeline, no per-stage
-  // special-cased animation sequence, and no distinction between "replay
-  // a finished transaction's history" and "render one flashing through in
-  // real time": both are just `computeFlowState(events)` over whatever
-  // list was passed in. That's what makes the exact same component
-  // correct for both `App.svelte`'s live event accumulation and
-  // `TransactionDetail.events` read back after the fact (via
-  // `detailEventsToFlowEvents`, `lib/types.ts`).
+  // Pipeline flow diagram: renders the fixed pipeline stages as an SVG
+  // and derives each node's status from the transaction's event list.
   import type { FlowEvent } from "../lib/types";
 
   export let events: FlowEvent[] = [];
@@ -29,10 +18,6 @@
     "Commit",
   ];
 
-  // §13.2's state machine mapped onto §32's ten fixed nodes. Stages not
-  // in this table (DENIED, REJECTED, FAILED, ROLLING_BACK, RESTORED,
-  // ROLLBACK_FAILED) have no node of their own — they're outcomes that
-  // land *on* one of these ten, handled in `computeFlowState` below.
   const STAGE_NODE_INDEX: Record<string, number> = {
     PARSED: 0,
     POLICY_CHECK: 1,
@@ -95,10 +80,6 @@
         continue;
       }
 
-      // §13.4/§32: DENIED terminates visibly at Policy — it never
-      // animates through Simulation or Execute, which is true here
-      // structurally (no event for those stages can ever arrive for a
-      // denied transaction), not because this branch suppresses them.
       switch (evt.stage) {
         case "DENIED":
           nodes[1].status = "error";
@@ -148,11 +129,6 @@
     return START_X + i * SPACING;
   }
 
-  // A single calm accent for anything "on" (active/done); status that
-  // needs to stand out as different-in-kind (error, deliberately
-  // stopped) gets its own muted tone instead of a brighter version of
-  // the same one — variance in hue reads as meaning here, not variance
-  // in intensity.
   function toneColor(status: NodeStatus): string {
     switch (status) {
       case "error":

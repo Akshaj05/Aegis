@@ -1,9 +1,6 @@
 <script lang="ts">
-  // §31.5: "Plain, non-alarming: the command is recognized but not
-  // implemented, with its tier named. No security framing, because it is
-  // not a security matter." Deliberately styled neutral, not red/amber —
-  // sharing color language with `DenyPanel` here would misrepresent this
-  // as a security outcome.
+  // Unsupported-command notice: informs the user a recognized command
+  // isn't implemented yet.
   import type { TransactionDetail } from "../lib/types";
 
   export let detail: TransactionDetail;

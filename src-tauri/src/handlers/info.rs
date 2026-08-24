@@ -1,14 +1,5 @@
-//! Pure informational commands (`env`, `printenv`, `whoami`, `id`,
-//! `uname`, `sleep`) — none of these resolve a path through
-//! [`crate::simulation::resolver::LayeredResolver`], so none of them carry
-//! the containment concerns `fs_ext`/`text_filters` do. `whoami`/`id`
-//! report the *real* host user the SafeShell process runs as: this dev
-//! build has no real user namespace remapping (`sandbox/worker/mod.rs`'s
-//! module doc — the namespaced worker isn't wired up yet), and inventing a
-//! synthetic identity here would be exactly the kind of stronger-than-real
-//! isolation claim docs/CLAUDE.md invariant #25 forbids. Once namespace
-//! mode is real, these same calls will correctly report the namespace's
-//! remapped identity for free, with no change needed here.
+// Pure informational command handlers: env, printenv, whoami, id, uname,
+// and sleep.
 
 use std::collections::BTreeMap;
 
@@ -75,8 +66,6 @@ pub fn cmd_id() -> CommandResult {
     ))
 }
 
-/// `uname [-a|-s|-r|-n|-m]`. Bare `uname` (no flags) prints only the
-/// kernel name, matching real `uname`'s default.
 pub fn cmd_uname(args: &[Arg]) -> CommandResult {
     let info = match nix::sys::utsname::uname() {
         Ok(i) => i,
@@ -104,10 +93,6 @@ pub fn cmd_uname(args: &[Arg]) -> CommandResult {
     CommandResult::ok(stdout)
 }
 
-/// `sleep SECONDS` — accepts an integer or fractional number of seconds,
-/// matching real `sleep`'s single-argument form (a real shell's
-/// multi-argument `sleep 1 2 3` sums them; not implemented here, a
-/// documented subset).
 pub fn cmd_sleep(args: &[Arg]) -> CommandResult {
     let Some(arg) = args.first() else {
         return CommandResult::error("sleep: missing operand\n", 1);

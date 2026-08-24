@@ -1,24 +1,5 @@
-//! Pure stdin/stdout filter commands: `wc`, `sort`, `uniq`, `cut`, `head`,
-//! `tail`, `date` (real uutils, spawned via [`coreutils_proc::run_filter`])
-//! and `grep` (hand-written — grep is not actually part of uutils/
-//! coreutils; GNU grep is a separate project, and uutils' own grep effort
-//! lives in a separate, immature repository, so it's implemented here with
-//! the `regex` crate instead, against bytes already read through
-//! [`LayeredResolver`]).
-//!
-//! **Scope, deliberately bounded**: every command here that reads a file
-//! (`wc`, `sort`, `uniq`, `cut`, `head`, `tail`, `grep`) requires exactly
-//! one file operand, given last — real coreutils' near-universal
-//! convention (`head -n 5 file.txt`, `cut -d, -f1 file.txt`) — rather than
-//! supporting stdin or multiple files. There is no stdin to read from (no
-//! handler pipes another handler's output into one yet — `parser`'s
-//! `pipeline_next` isn't wired to `handlers::dispatch` at all, a
-//! pre-existing gap, not something this pass changes), and concatenating
-//! multiple files' bytes before handing them to the real uutils binary
-//! would silently lose each command's real per-file semantics (`wc`'s
-//! per-file line counts, `head`'s per-file `==>` headers) rather than
-//! reproducing them — failing closed with a clear error on 2+ files is
-//! more honest than a subtly-wrong multi-file result.
+// Pure stdin/stdout filter command handlers: wc, sort, uniq, cut, head,
+// tail, date, and grep, each operating on a single file operand.
 
 use crate::parser::Arg;
 use crate::session::TerminalSession;
@@ -105,13 +86,6 @@ pub fn cmd_head(
     run_uutils_filter_on_one_file("head", session, resolver, args)
 }
 
-/// `tail`, with `-f`/`-F`/`--follow` refused up front: SafeShell's stdin
-/// pipe to the sidecar is a finite, already-fully-written buffer, not a
-/// live, growing file descriptor — `-f` has nothing meaningful to follow,
-/// and letting the subprocess try would depend on GNU tail's
-/// not-formally-specified-here behavior on a closed, non-seekable pipe
-/// rather than a deliberate SafeShell decision. `safeshell-tail.rs`'s doc
-/// comment states this same promise.
 pub fn cmd_tail(
     session: &TerminalSession,
     resolver: &LayeredResolver,
@@ -126,11 +100,6 @@ pub fn cmd_tail(
     run_uutils_filter_on_one_file("tail", session, resolver, args)
 }
 
-/// `date [FORMAT/FLAGS]` — no file operand, no stdin needed. `-s`/`--set`
-/// is refused up front rather than handed to the subprocess: it would
-/// attempt to change the real host system clock, entirely outside the
-/// simulated environment (`safeshell-date.rs`'s doc comment states this
-/// same promise).
 pub fn cmd_date(args: &[Arg]) -> CommandResult {
     let flags: Vec<&str> = args.iter().map(Arg::as_str).collect();
     if flags.iter().any(|f| *f == "-s" || f.starts_with("--set")) {
@@ -144,12 +113,6 @@ pub fn cmd_date(args: &[Arg]) -> CommandResult {
     }
 }
 
-/// `grep [-i] [-n] [-v] PATTERN FILE` — a documented subset of real
-/// grep's flags (`policies/supported_commands.toml`'s
-/// `partially_supported.divergences`): no `-r`/recursive directory search,
-/// no multiple files, no reading stdin. Not sourced from uutils (see
-/// module doc) — hand-written against the `regex` crate over bytes read
-/// through [`LayeredResolver`].
 pub fn cmd_grep(
     session: &TerminalSession,
     resolver: &LayeredResolver,
@@ -272,10 +235,6 @@ mod tests {
     fn wc_counts_lines_words_bytes_of_a_real_file() {
         let mut session = TerminalSession::new();
         let (_tmp, resolver) = resolver();
-        // `write_file` goes through `echo`, which always appends its own
-        // trailing newline (`handlers::mod::cmd_echo`) — content already
-        // ending in `\n` therefore ends up with two lines' worth of
-        // newline bytes, hence 3 lines total below.
         write_file(&mut session, &resolver, "a.txt", "one two\nthree\n");
 
         let r = dispatch("wc", &args(&["-l", "a.txt"]), &[], &mut session, &resolver);

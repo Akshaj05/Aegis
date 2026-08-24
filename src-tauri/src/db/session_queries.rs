@@ -1,4 +1,5 @@
-//! Typed queries against `sessions` and `commands` (§34).
+// Typed database queries for creating and reading sessions, commands,
+// and per-session terminal history.
 
 use rusqlite::params;
 
@@ -75,7 +76,6 @@ impl Database {
             })
     }
 
-    /// `list_sessions`'s (§30) source, newest first.
     pub fn list_sessions(&self) -> rusqlite::Result<Vec<SessionRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, created_at, simulation_backend, status FROM sessions ORDER BY created_at DESC",
@@ -91,10 +91,6 @@ impl Database {
         rows.collect()
     }
 
-    /// §17.8's per-session scrollback (`terminal_history`, §34) — distinct
-    /// from `TerminalSession::record_history` (in-memory, per process
-    /// lifetime only); this is the persisted copy `get_transaction_history`
-    /// adjacent UI (§31.2's bottom strip) can read back across restarts.
     pub fn insert_terminal_history(
         &self,
         session_id: &str,

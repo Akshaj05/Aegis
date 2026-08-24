@@ -1,21 +1,5 @@
-//! Length-prefixed framing for `WorkerRequest`/`WorkerResponse` over a
-//! `UnixStream`. See `docs/architecture.md` §8: "typed request/response
-//! over socketpair" and §25.2.
-//!
-//! No `unsafe` needed: `std::os::unix::net::UnixStream::pair()` is a safe
-//! std API for creating a connected socketpair, so this module doesn't
-//! need `sandbox/syscalls.rs` at all.
-//!
-//! Functions take `&UnixStream`, not `&mut UnixStream`: std provides
-//! `Read`/`Write` for `&UnixStream` (the underlying fd operation doesn't
-//! need exclusive access), which is exactly what lets
-//! `SandboxBackend::exec_in_sandbox(&self, ...)` — a shared-reference
-//! trait method — send and receive over a handle's socket without needing
-//! interior mutability or a lock for that alone. Callers must still not
-//! interleave two requests on the same handle concurrently (see
-//! `namespace_backend.rs`'s doc comment) — this only removes an
-//! unnecessary `&mut` requirement, it doesn't make concurrent request use
-//! safe on its own, since responses aren't correlated to requests by ID.
+// Length-prefixed framing for sending/receiving WorkerRequest and
+// WorkerResponse messages over a UnixStream.
 
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -23,9 +7,6 @@ use std::os::unix::net::UnixStream;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-/// Refuses to allocate more than this for one incoming message. A
-/// misbehaving or compromised peer sending an inflated length prefix
-/// should not be able to drive unbounded allocation in the reader.
 const MAX_MESSAGE_BYTES: u32 = 16 * 1024 * 1024;
 
 pub fn send_message<T: Serialize>(stream: &UnixStream, msg: &T) -> io::Result<()> {
@@ -122,8 +103,6 @@ mod tests {
     #[test]
     fn oversized_length_prefix_is_rejected_before_allocating() {
         let (mut a, b) = UnixStream::pair().unwrap();
-        // Write a length prefix bigger than MAX_MESSAGE_BYTES directly,
-        // bypassing send_message, to simulate a hostile/corrupt peer.
         a.write_all(&(MAX_MESSAGE_BYTES + 1).to_be_bytes()).unwrap();
         let result: io::Result<WorkerRequest> = recv_message(&b);
         assert!(result.is_err());

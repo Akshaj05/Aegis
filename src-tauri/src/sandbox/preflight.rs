@@ -1,10 +1,5 @@
-//! Preflight Capability Checker: runs every active self-test from
-//! `docs/architecture.md` §15.2 and aggregates them into one
-//! `CapabilityReport`. See §11 (component table) and §15.3 (fail-closed
-//! rule — this module reports status; it does not itself decide policy.
-//! `CapabilityReport::execution_available()`/`process_commands_available()`
-//! in `backend.rs` are what downstream code checks before offering
-//! sandboxed execution).
+// Preflight capability checker: runs every sandbox primitive probe and
+// aggregates the results into one CapabilityReport.
 
 use crate::sandbox::backend::{CapabilityReport, PrimitiveStatus};
 use crate::sandbox::{cgroups, landlock, seccomp, syscalls};
@@ -16,9 +11,6 @@ impl PreflightCapabilityChecker {
         PreflightCapabilityChecker
     }
 
-    /// Runs every probe and aggregates the result. Each probe is
-    /// independent — one probe's failure does not skip the others, so the
-    /// report is always complete, matching §15.2's "aggregate report" row.
     pub fn run(&self) -> CapabilityReport {
         let user_namespaces = syscalls::probe_user_namespace();
         let mount_namespaces = syscalls::probe_mount_namespace_and_pivot_root();
@@ -28,10 +20,6 @@ impl PreflightCapabilityChecker {
         let landlock_status = landlock::probe();
         let openat2 = syscalls::probe_openat2();
 
-        // Real multi-lowerdir OverlayFS self-testing (mount a probe
-        // overlay, write, verify whiteout/opaque semantics survive
-        // re-stacking, per §15.2's OverlayFS row) belongs with the layer
-        // model, Build order phase 3 — this pass doesn't guess at it.
         let overlayfs = PrimitiveStatus::Unavailable {
             reason: "not yet probed — OverlayFS self-test lands with the layer model (Build order phase 3)".into(),
         };
@@ -75,10 +63,6 @@ mod tests {
     fn run_produces_a_complete_report_regardless_of_individual_probe_outcomes() {
         let report = PreflightCapabilityChecker::new().run();
 
-        // "Complete" here means every field was actually assigned by a
-        // real probe (not skipped) — not that every probe reported `Ok`,
-        // which is genuinely environment-dependent (see the "Honesty
-        // note" in sandbox/syscalls.rs for what this machine reports).
         println!("--- CapabilityReport (this machine) ---");
         println!("user_namespaces:   {}", report.user_namespaces);
         println!("mount_namespaces:  {}", report.mount_namespaces);
@@ -98,9 +82,6 @@ mod tests {
             report.process_commands_available()
         );
 
-        // overlayfs is unconditionally "not yet probed" this pass (see
-        // module docs) — assert that honestly rather than assuming any
-        // particular real status for it.
         assert!(
             matches!(&report.overlayfs, PrimitiveStatus::Unavailable { reason } if reason.contains("Build order phase 3"))
         );

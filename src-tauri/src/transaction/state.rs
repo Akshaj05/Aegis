@@ -1,12 +1,8 @@
-//! `TransactionState` and the legal-transition table. See
-//! `docs/architecture.md` §13.1-§13.3. The Transaction Manager
-//! (`manager.rs`) is the only component permitted to change transaction
-//! state, and it does so exclusively through [`transition`] — there is no
-//! other way to move from one state to another anywhere in this crate.
+// `TransactionState` enum and the legal state-transition table; the sole
+// authority for which transitions are legal, consulted by `transition`.
 
 use std::fmt;
 
-/// §13.1's seventeen states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TransactionState {
     Received,
@@ -29,44 +25,24 @@ pub enum TransactionState {
 }
 
 impl TransactionState {
-    /// §13.1's "Terminal?" column.
     pub fn is_terminal(self) -> bool {
         self.legal_next_states().is_empty()
     }
 
-    /// §13.2's transition table, with one deliberate addition: `PolicyCheck
-    /// -> Failed`. §13.2's literal text only has `POLICY_CHECK -> DENIED |
-    /// AI_ANALYSIS`, but that table predates `Verdict::RejectUnsupported`
-    /// (`policy::types`) needing *some* legal target for "not implemented"
-    /// (see `transaction/manager.rs`'s module doc for the full reasoning
-    /// on why `Failed`, not `Denied`). Every other edge below is §13.2
-    /// verbatim. This is the **only** place the table is encoded —
-    /// [`Self::can_transition_to`] and [`transition`] both defer to this,
-    /// so the table can never drift between two independent copies of it.
     pub fn legal_next_states(self) -> &'static [TransactionState] {
         use TransactionState::*;
         match self {
             Received => &[Parsed, Failed],
             Parsed => &[PolicyCheck, Failed],
             PolicyCheck => &[Denied, Failed, AiAnalysis],
-            // "always; AI failure sets flag, never blocks" (§13.2) — a
-            // single legal next state, unconditionally.
             AiAnalysis => &[Simulating],
             Simulating => &[DiffReady, Failed],
             DiffReady => &[WaitingForApproval, Snapshotting],
-            // "FAILED on session teardown/timeout" (§13.2's own
-            // annotation for this row).
             WaitingForApproval => &[Snapshotting, Rejected, Failed],
             Snapshotting => &[Executing, Failed],
             Executing => &[Verifying, RollingBack],
             Verifying => &[Committed, RollingBack],
             RollingBack => &[Restored, RollbackFailed],
-            // Terminal states: no outgoing edges. "Any state may
-            // transition to FAILED only via the explicit edges above.
-            // There is no wildcard 'anything -> anything' escape hatch"
-            // (§13.2) — note Committed/Restored/Rejected/Denied/Failed/
-            // RollbackFailed do *not* have an edge to Failed themselves;
-            // once terminal, always terminal.
             Committed | Restored | Rejected | Denied | Failed | RollbackFailed => &[],
         }
     }
@@ -83,12 +59,6 @@ pub struct IllegalTransitionError {
     pub to: TransactionState,
 }
 
-/// The single function that validates a state change. §13's own
-/// characterization of an illegal transition: "not merely 'not performed'
-/// — evidence of a logic defect." This function only ever *reports* that;
-/// what a caller does about it (panic in debug, `FAILED` + a loud audit
-/// event in release, per docs/CLAUDE.md) is `TransactionManager`'s job in
-/// `manager.rs`, not this pure function's.
 pub fn transition(
     from: TransactionState,
     to: TransactionState,
@@ -125,9 +95,6 @@ impl fmt::Display for TransactionState {
     }
 }
 
-/// All seventeen states, for exhaustive property tests (and later, for
-/// enumerating states in the frontend's pipeline visualization without
-/// duplicating this list there).
 pub const ALL_STATES: &[TransactionState] = &[
     TransactionState::Received,
     TransactionState::Parsed,
@@ -191,9 +158,6 @@ mod tests {
 
     #[test]
     fn every_pair_not_in_the_legal_table_is_rejected() {
-        // docs/CLAUDE.md's Testing table, verbatim: "Illegal-transition
-        // rejection for every pair not in the transition table." Exhaustive
-        // over all 17*17 ordered pairs, not a sample.
         let mut checked = 0usize;
         let mut illegal_checked = 0usize;
         for &from in ALL_STATES {
@@ -256,23 +220,14 @@ mod tests {
         }
     }
 
-    // --- §13.3's seven impossibility invariants, as structural facts
-    // about the transition table itself. ---
-
     #[test]
     fn invariant_denied_never_reaches_executing() {
         assert!(Denied.is_terminal());
-        // No state at all has an edge *into* Denied except PolicyCheck,
-        // and Denied itself has no path forward — so nothing downstream of
-        // Denied, including Executing, is reachable from it.
         assert!(!Denied.can_transition_to(Executing));
     }
 
     #[test]
     fn invariant_rejected_never_modifies_persistent_state() {
-        // REJECTED is reachable only from WAITING_FOR_APPROVAL, which is
-        // strictly before SNAPSHOTTING (the first state that writes
-        // anything persistent) in every legal path.
         let reachable_from: Vec<TransactionState> = ALL_STATES
             .iter()
             .copied()
@@ -309,7 +264,6 @@ mod tests {
 
     #[test]
     fn invariant_execution_never_occurs_without_a_snapshot() {
-        // Structurally: Executing is reachable only from Snapshotting.
         let reachable_from: Vec<TransactionState> = ALL_STATES
             .iter()
             .copied()
@@ -320,7 +274,6 @@ mod tests {
 
     #[test]
     fn category_1_safe_path_reaches_committed() {
-        // §13.4: "RECEIVED -> ... -> DIFF_READY -> SNAPSHOTTING -> EXECUTING -> VERIFYING -> COMMITTED."
         let path = [
             Received,
             Parsed,
@@ -365,8 +318,6 @@ mod tests {
 
     #[test]
     fn category_3_unsafe_to_contain_path_ends_at_denied() {
-        // §13.4: "RECEIVED -> PARSED -> POLICY_CHECK -> DENIED. Never
-        // simulated, never snapshotted, never executed."
         assert!(Received.can_transition_to(Parsed));
         assert!(Parsed.can_transition_to(PolicyCheck));
         assert!(PolicyCheck.can_transition_to(Denied));

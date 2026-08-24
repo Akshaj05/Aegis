@@ -1,9 +1,6 @@
-//! `PolicyEngine` — orchestrates §20.1's evaluation order over the pieces
-//! `support_tiers.rs`, `containment.rs`, and `risk.rs` provide. This is
-//! the sole security authority (docs/CLAUDE.md invariant #5): deterministic,
-//! no ML, and — per invariant #7 — this module and everything it depends
-//! on must never import `ai/` (checked by
-//! `tests/policy_engine_tests/main.rs`'s `guarded_modules_never_reference_ai_module`).
+// PolicyEngine: orchestrates the deterministic evaluation order over
+// support tiers, containment rules, and risk classification to produce a
+// PolicyDecision for a parsed command or pipeline.
 
 use std::path::Path;
 
@@ -14,11 +11,6 @@ use crate::policy::support_tiers::{SupportTierLoadError, SupportTierTable};
 use crate::policy::types::{Category, PolicyDecision, ReasonCode, RiskLevel, SupportTier, Verdict};
 use crate::sandbox::backend::CapabilityReport;
 
-/// Commands whose execution mode needs a working PID namespace (§15.2's
-/// PID-namespace row). Kept as a small, explicit list rather than derived
-/// from `SupportTier::PartiallySupported` (which includes `find`/`grep`
-/// too, for unrelated reasons — flag-subset support, not process
-/// visibility) so this list means exactly one thing.
 fn is_process_affecting(command_name: &str) -> bool {
     matches!(command_name, "ps" | "kill")
 }
@@ -39,12 +31,6 @@ impl PolicyEngine {
         PolicyEngine { support_tiers }
     }
 
-    /// §20.1's evaluation order, steps 1-4 (step 5, post-simulation
-    /// re-evaluation, is [`apply_post_simulation_escalation`] — a separate
-    /// call, since it needs a diff this function's inputs don't have).
-    /// Evaluates only the first stage of a pipeline; pipeline-wide
-    /// evaluation (taking the most severe verdict/risk across all stages)
-    /// is `evaluate_pipeline`.
     pub fn evaluate(
         &self,
         cmd: &ParsedCommand,
@@ -52,8 +38,6 @@ impl PolicyEngine {
     ) -> PolicyDecision {
         let tier = self.support_tiers.resolve(&cmd.name);
 
-        // §20.1 step 2 short-circuit: UNSUPPORTED never reaches
-        // containment or risk rules at all.
         if tier == SupportTier::Unsupported {
             return PolicyDecision {
                 support_tier: tier,
@@ -68,18 +52,15 @@ impl PolicyEngine {
             };
         }
 
-        // §20.1 step 1: command-name-level containment (DENY_SHELL_INVOCATION).
         if tier == SupportTier::Denied {
             let code = self.support_tiers.denied_reason_code();
             return deny(tier, code, code.canonical_text().to_string());
         }
 
-        // §20.1 step 1 (continued): per-invocation containment rules.
         if let Some((code, reason)) = containment::check_sensitive_pseudo_paths(cmd) {
             return deny(tier, code, reason);
         }
 
-        // §20.1 step 3: capability gating.
         let process_commands = is_process_affecting(&cmd.name);
         if let Some((code, reason)) =
             containment::check_capability_gate(capability_report, process_commands)
@@ -87,8 +68,6 @@ impl PolicyEngine {
             return deny(tier, code, reason);
         }
 
-        // §20.1 step 4: risk classification (never produces Deny — see
-        // risk.rs's module doc and §20.2).
         let divergence = self.support_tiers.divergence(&cmd.name);
         let finding = risk::classify(cmd, divergence);
         let risk_level = finding.as_ref().map(|f| f.level).unwrap_or(RiskLevel::Low);
@@ -97,13 +76,6 @@ impl PolicyEngine {
         allow_or_require_approval(tier, risk_level, reasons)
     }
 
-    /// Evaluates every stage of a pipeline (`cmd.pipeline_next` chain) and
-    /// combines them: the most severe verdict wins, in the order `Deny`,
-    /// then `RequireApproval`, then `Allow`; among non-`Deny` stages the
-    /// highest risk level wins. `RejectUnsupported` on any stage
-    /// short-circuits the whole pipeline the same way it would a single
-    /// command, since a pipeline with an unimplemented stage can't run at
-    /// all regardless of the other stages' classification.
     pub fn evaluate_pipeline(
         &self,
         cmd: &ParsedCommand,
@@ -145,12 +117,7 @@ fn allow_or_require_approval(
     risk_level: RiskLevel,
     reasons: Vec<String>,
 ) -> PolicyDecision {
-    // §10.2's table: LOW -> Allow (no approval pause); MEDIUM/HIGH/CRITICAL
-    // -> RequireApproval. This is the only place Verdict::Allow is ever
-    // produced for a Supported/PartiallySupported command — keeping it a
-    // single function makes that correspondence a fact about the code,
-    // not just documentation of an invariant callers must remember to
-    // preserve.
+
     let (verdict, category) = if risk_level == RiskLevel::Low {
         (Verdict::Allow, Category::Safe)
     } else {
@@ -167,18 +134,6 @@ fn allow_or_require_approval(
     }
 }
 
-/// §20.1 step 5 / §20.5: re-evaluates a decision against the real
-/// post-simulation diff. Called separately from `evaluate` because it
-/// needs a `SimulationDiffStats` that doesn't exist until Build order
-/// phase 6 produces a real diff — this function is ready for that input
-/// today, tested against synthetic stats (see `risk.rs`'s tests for the
-/// threshold logic itself; this wrapper's job is just to thread the
-/// escalated risk level back into `Verdict`/`Category` correctly).
-///
-/// A no-op for `Deny`/`RejectUnsupported` decisions (§20.5: "can never
-/// move it to Deny" — the converse also holds, nothing here ever *starts*
-/// from Deny and changes it) and for decisions with no `risk_level` to
-/// escalate.
 pub fn apply_post_simulation_escalation(
     decision: PolicyDecision,
     stats: &SimulationDiffStats,
@@ -258,10 +213,6 @@ reason_code = "DENY_SHELL_INVOCATION"
             .0
     }
 
-    // --- The "must not be denied" corpus (docs/CLAUDE.md's Testing
-    // table, §20.2). Every one of these is dangerous and must resolve to
-    // RequireApproval, never Deny. ---
-
     #[test]
     fn must_not_be_denied_rm_rf_project() {
         let decision = engine().evaluate(&parse("rm -rf /project"), &full_capability_report());
@@ -302,8 +253,6 @@ reason_code = "DENY_SHELL_INVOCATION"
         assert_eq!(decision.risk_level, Some(RiskLevel::High));
     }
 
-    // --- The "must always be denied" boundary corpus. ---
-
     #[test]
     fn must_always_be_denied_shell_invocation() {
         let decision = engine().evaluate(&parse("bash"), &full_capability_report());
@@ -334,8 +283,6 @@ reason_code = "DENY_SHELL_INVOCATION"
             vec![ReasonCode::DenyCapabilityUnavailable]
         );
     }
-
-    // --- Verdict-shape invariants. ---
 
     #[test]
     fn unsupported_command_rejects_without_deny() {
@@ -374,8 +321,6 @@ reason_code = "DENY_SHELL_INVOCATION"
         assert_eq!(decision.risk_level, Some(RiskLevel::Medium));
     }
 
-    // --- Pipeline evaluation. ---
-
     #[test]
     fn pipeline_takes_the_most_severe_stage() {
         let decision = engine().evaluate_pipeline(
@@ -399,8 +344,6 @@ reason_code = "DENY_SHELL_INVOCATION"
             engine().evaluate_pipeline(&parse("cat /project/f"), &full_capability_report());
         assert_eq!(decision.verdict, Verdict::Allow);
     }
-
-    // --- Post-simulation escalation (§20.1 step 5). ---
 
     #[test]
     fn post_simulation_escalation_upgrades_verdict_when_it_crosses_out_of_low() {

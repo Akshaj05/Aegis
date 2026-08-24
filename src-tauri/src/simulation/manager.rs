@@ -1,15 +1,6 @@
-//! Ties transient-layer lifecycle, `LayeredResolver`, and the shared
-//! `handlers::dispatch` code path together into one simulation pass
-//! (§22.2). This is the concrete realization of docs/CLAUDE.md invariant
-//! #12: "Simulation writes only to a disposable transient layer, unlinked
-//! on every path (success, error, panic-unwind, rejection, teardown). Tie
-//! its lifetime to an RAII guard" — [`TransientLayerGuard`] is that guard.
-//!
-//! **Scope**: one command, not a pipeline — `handlers::dispatch` itself
-//! only handles a single stage (§17.8's pipe-wiring between stages isn't
-//! implemented yet), so `simulate` doesn't attempt to either. Extending to
-//! pipelines is a `handlers/`-level change this module would then just
-//! call once, not a `simulation/`-level redesign.
+// Ties transient-layer lifecycle, LayeredResolver, and the shared
+// handler dispatch code path together into one simulation pass for a
+// single command.
 
 use crate::handlers::{self, CommandResult};
 use crate::parser::ParsedCommand;
@@ -25,19 +16,6 @@ pub struct SimulationOutcome {
     pub diff: SimulationDiff,
 }
 
-/// Owns a transient layer for exactly as long as this guard lives, and
-/// discards it on drop — unconditionally, regardless of whether the scope
-/// exited normally, via `?`, or via an unwinding panic. Errors from the
-/// discard itself are swallowed: a guard's `Drop` can't return a
-/// `Result`, and a failed cleanup of a *disposable* layer (never anything
-/// persistent) isn't something any caller could meaningfully act on
-/// differently than "log and move on" — this doesn't log yet either
-/// (no `audit`/logging wiring reaches this deep into `simulation/`),
-/// which is a real, disclosed gap, not a silent one: swallowing a
-/// transient-layer discard failure here has no correctness impact (worst
-/// case is a leaked directory under the layers root, not a security or
-/// persistence issue), but should get a log line once this module has
-/// somewhere to send one.
 struct TransientLayerGuard<'a> {
     backend: &'a dyn SimulationBackend,
     id: crate::snapshot::backend::TransientLayerId,
@@ -49,15 +27,6 @@ impl Drop for TransientLayerGuard<'_> {
     }
 }
 
-/// §22.2's mechanism, steps 1-5: fresh transient layer, mount a view with
-/// it as the write target, run the shared handler code path against that
-/// view, compute the diff, discard the transient layer. Step 5 (discard)
-/// happens via `TransientLayerGuard`'s `Drop`, so it runs on every exit
-/// path from this function, including an early `?` return from a failed
-/// `mount_view`/`LayeredResolver::from_mounted_view` — matching §22.4:
-/// "If the transient layer cannot be created, the view cannot be mounted,
-/// or the handler errors during simulation, the transaction moves to
-/// FAILED. It does not proceed to execution."
 pub fn simulate(
     backend: &dyn SimulationBackend,
     layers: &LayerStack,
@@ -88,7 +57,7 @@ pub fn simulate(
         .clone();
     let diff = diff::compute(&transient_layer_path, &view)?;
 
-    drop(guard); // explicit for clarity; would happen at scope end regardless.
+    drop(guard);
     Ok(SimulationOutcome {
         command_result,
         diff,
@@ -146,7 +115,6 @@ mod tests {
             outcome.diff.directories_created,
             vec!["project".to_string()]
         );
-        // The whole point: nothing landed in the active write layer or base.
         assert!(!stack.active_write.join("project").exists());
         assert!(!stack.base.join("project").exists());
     }
@@ -208,9 +176,6 @@ mod tests {
 
     #[test]
     fn simulation_failure_leaves_no_trace_and_returns_an_error() {
-        // Simulate against a layer stack whose base directory doesn't
-        // exist at all — mount_view (and therefore the whole pass) should
-        // fail cleanly rather than silently proceeding.
         let tmp = tempfile::tempdir().unwrap();
         let backend = CopyUpSimulationBackend::new(tmp.path().join("layers")).unwrap();
         let stack = LayerStack {

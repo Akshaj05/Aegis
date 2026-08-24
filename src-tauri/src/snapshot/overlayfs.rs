@@ -1,30 +1,5 @@
-//! `OverlayFsSimulationBackend` — the MVP-preferred `SimulationBackend`
-//! (§14.4): "Kernel OverlayFS with multiple `lowerdir` entries rather than
-//! literally nesting overlay mounts."
-//!
-//! **Unverified in this pass.** [`self_test`] performs a real mount
-//! attempt (matching §15.2's "mount a probe overlay with multiple lowers,
-//! write, verify whiteout/opaque semantics survive re-stacking"), and on
-//! this development machine it fails for two independent reasons: `overlay`
-//! isn't a registered filesystem type at all (`grep overlay
-//! /proc/filesystems` finds nothing), and even a plain `mount --bind`
-//! fails here with "must be superuser" (no `CAP_SYS_ADMIN`, consistent
-//! with `sandbox/`'s namespace-entry findings — the real usage context for
-//! this backend is *inside* a namespaced sandbox worker where that
-//! process is "root" in its own namespace, which this environment can
-//! never produce; see `sandbox/namespace_backend.rs`). The mount
-//! construction (`lowerdir`/`upperdir`/`workdir` options) is written to
-//! the best of my understanding of `mount_setattr`/`overlayfs(5)`, but has
-//! never actually mounted anything, anywhere, in this project's history.
-//! Verify on a real Linux host.
-//!
-//! Everything below `mount_view` (seal/discard/restore/size) is identical
-//! directory-lifecycle logic to `copyup.rs` — sealing is a rename
-//! regardless of how the *view* is presented. That duplication is real and
-//! could be factored out later (e.g. both backends composing a shared
-//! `LayerLifecycle` helper); kept separate for now so each backend stays a
-//! single, independently-readable file matching how the architecture
-//! frames them as independently selectable implementations.
+// `SimulationBackend` implementation backed by kernel OverlayFS, using
+// multiple `lowerdir` entries instead of nesting overlay mounts.
 
 use std::path::PathBuf;
 
@@ -40,9 +15,6 @@ use crate::snapshot::backend::{
 
 pub struct OverlayFsSimulationBackend {
     layers_root: PathBuf,
-    /// Where `mount_view` mounts the merged view. A real mountpoint, not a
-    /// managed layer directory — `discard_layer`/`layer_size_bytes` never
-    /// address this path.
     mount_point: PathBuf,
 }
 
@@ -175,21 +147,7 @@ impl SimulationBackend for OverlayFsSimulationBackend {
     }
 }
 
-/// §15.2's OverlayFS preflight row: mount a probe overlay with multiple
-/// lowers, write through it, verify the write lands in `upperdir` and a
-/// lower-only file is still visible through the merged view. Runs in a
-/// throwaway forked child (`sandbox::syscalls::run_probe_in_child`) so a
-/// partial or unexpected success doesn't leave a live mount in the calling
-/// process's mount namespace.
 pub fn self_test() -> PrimitiveStatus {
-    // Computed *before* forking and moved into the child by value, so the
-    // parent's post-run cleanup (below) names the exact same directory the
-    // child created. Computing this from `std::process::id()` separately
-    // on each side is a real bug this project already made once: inside
-    // the child, that call returns the *child's* pid, not the parent's, so
-    // a cleanup line built the same way in the parent never matches and
-    // silently leaks a directory on every run — worth spelling out since
-    // it's an easy mistake to reintroduce.
     let root =
         std::env::temp_dir().join(format!("safeshell-overlay-selftest-{}", ulid::Ulid::new()));
     let root_for_child = root.clone();
@@ -207,8 +165,6 @@ pub fn self_test() -> PrimitiveStatus {
                 return 1;
             }
         }
-        // A file that exists only in the lower layers — the merged view
-        // must still show it after a successful mount.
         if std::fs::write(lower2.join("from_lower.txt"), b"lower content").is_err() {
             return 2;
         }
@@ -232,16 +188,12 @@ pub fn self_test() -> PrimitiveStatus {
             return 3;
         }
 
-        // Write through the merged view; it must land in `upper`, not in
-        // either lower directory (copy-up-free — this is a genuinely new
-        // file, not a modification of an existing lower-layer file).
         if std::fs::write(merged.join("new_file.txt"), b"new content").is_err() {
             return 4;
         }
         if !upper.join("new_file.txt").is_file() {
             return 5;
         }
-        // The lower-only file must still be visible through the merge.
         if std::fs::read(merged.join("from_lower.txt")).is_err() {
             return 6;
         }
@@ -250,8 +202,6 @@ pub fn self_test() -> PrimitiveStatus {
         0
     });
 
-    // Same `root` value the child used (see above) — this is the fix for
-    // the bug described in that comment.
     let _ = std::fs::remove_dir_all(&root);
 
     match outcome {
@@ -272,22 +222,6 @@ pub fn self_test() -> PrimitiveStatus {
 mod tests {
     use super::*;
 
-    /// Covers both "runs to completion" and the leak regression in one
-    /// test, deliberately: two separate tests each calling `self_test()`
-    /// independently raced against each other on the shared `/tmp`
-    /// directory-prefix scan (both counted, from different threads, while
-    /// the other's call was mid-flight) and made this assertion flaky
-    /// under `cargo test`'s default parallelism. A single call site
-    /// removes the race entirely rather than papering over it with a
-    /// lock.
-    ///
-    /// The leak this guards against was real: an earlier version of
-    /// `self_test` computed its cleanup path with `std::process::id()` in
-    /// the parent, while the child (which actually created the directory)
-    /// computed its own path with the same call — returning the *child's*
-    /// pid, not the parent's. The two never matched, so cleanup silently
-    /// did nothing, and every test run leaked a directory on a disk that
-    /// was already nearly full on this development machine.
     #[test]
     fn self_test_runs_to_completion_and_does_not_leak_its_scratch_directory() {
         let matching_entries = || -> Vec<_> {
@@ -320,8 +254,6 @@ mod tests {
 
     #[test]
     fn lifecycle_methods_work_independent_of_mount_support() {
-        // seal/discard/restore/size don't touch the kernel mount at all —
-        // real-verifiable here regardless of overlay availability.
         let tmp = tempfile::tempdir().unwrap();
         let backend = OverlayFsSimulationBackend::new(tmp.path().join("layers")).unwrap();
         let base = tmp.path().join("base");

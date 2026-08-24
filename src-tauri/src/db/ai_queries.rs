@@ -1,16 +1,5 @@
-//! Typed queries against `ai_plans` (§34) — the table Build order phase 9
-//! actually produces data for. `insert_ai_plan` accepts `validated: false`
-//! plus a `raw_response` with every typed column left `NULL`, for a
-//! response that arrived but failed `ai::validation::validate` — that
-//! shape is real and tested here at the query layer. `transaction::manager`
-//! itself doesn't currently exercise that path: `ai::backend::AiOutcome`
-//! collapses "transport failure," "timed out," and "response failed
-//! validation" into one `Skipped { reason }` variant with no raw text
-//! attached (§21.9 treats all three identically — proceed on
-//! deterministic policy, set `ai_skipped`), so only the `Analyzed` case
-//! ever reaches `insert_ai_plan` today. A future pass that wants
-//! validation-failure forensics recorded in this table would need
-//! `AiOutcome` to carry the raw text through that variant first.
+// Typed database queries for reading and writing AI plan records
+// (`ai_plans` table) associated with transactions.
 
 use rusqlite::params;
 
@@ -70,9 +59,6 @@ impl Database {
             })
     }
 
-    /// Build order phase 10: `get_transaction_detail`'s (§41) `ai_plan`
-    /// field needs the full row, not just the `validated` flag
-    /// `get_ai_plan_validated` reports.
     pub fn get_ai_plan(&self, transaction_id: &str) -> rusqlite::Result<Option<AiPlanRow>> {
         self.conn
             .query_row(

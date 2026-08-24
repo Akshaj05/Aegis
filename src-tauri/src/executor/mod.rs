@@ -1,19 +1,5 @@
-//! Secure Executor: runs the same handler code path as simulation, against
-//! the persistent active write layer, reachable only via an
-//! `ApprovedExecutionToken`. See `docs/architecture.md` §24.
-//!
-//! **Shares its shape with `simulation::manager::simulate`
-//! deliberately** (docs/CLAUDE.md invariant #20 / §19.3): same
-//! `handlers::dispatch` call, same `simulation::diff::compute` diff
-//! computation, same `LayeredResolver`. The only real difference is the
-//! write target — `WriteTarget::ActiveWrite` (persistent) instead of
-//! `WriteTarget::Transient` (discarded via an RAII guard on every exit
-//! path) — and the token check at the top, which simulation has no
-//! equivalent of because simulation never touches persistent state at
-//! all.
-//!
-//! Must never depend on `ai/` (docs/CLAUDE.md invariant #7) — enforced by
-//! `tests/policy_engine_tests`'s dependency scan.
+// Secure Executor: runs a parsed command against the persistent active
+// write layer, gated behind a validated ApprovedExecutionToken.
 
 use crate::handlers::{self, CommandResult};
 use crate::parser::ParsedCommand;
@@ -28,15 +14,6 @@ pub struct ExecutionOutcome {
     pub diff: SimulationDiff,
 }
 
-/// §24: "The Executor validates that the checkpoint id resolves to a
-/// sealed layer before doing anything. There is no other entry point."
-/// `token` can only have been constructed on the real
-/// `SNAPSHOTTING -> EXECUTING` edge (`ApprovedExecutionToken`'s
-/// `pub(super)` constructor), but this still checks that its checkpoint
-/// id names a layer actually present in `layers` — a token from a
-/// different session's layer stack, or a stack that has since been
-/// GC'd/rolled back out from under it, must not be treated as
-/// authorization to write here.
 pub fn execute(
     backend: &dyn SimulationBackend,
     layers: &LayerStack,
@@ -141,12 +118,6 @@ mod tests {
         db
     }
 
-    /// Drives a real `Transaction` through the real state machine up to
-    /// `SNAPSHOTTING -> EXECUTING`, sealing `checkpoint_id` (already
-    /// sealed for real on `stack` by the caller) along the way — the only
-    /// way this crate allows an `ApprovedExecutionToken` to come into
-    /// existence (docs/CLAUDE.md invariant #11). No bypass, no test-only
-    /// constructor.
     fn approved_token_for(db: &Database, checkpoint_id: CheckpointId) -> ApprovedExecutionToken {
         let mut sink = CollectingEventSink::default();
         let cmd = parse("mkdir project");

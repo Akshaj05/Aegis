@@ -1,12 +1,5 @@
-//! Loads `simulated-root-image/nondeterministic-paths.toml` (§26.3): "the
-//! allowlist is static, per-path, defined in the base image manifest, and
-//! deliberately small." Self-validates on load, same posture as
-//! `policy::support_tiers::SupportTierTable::load` — a malformed or
-//! missing file must surface as a load error the caller fails closed on
-//! (§28: "an unverifiable execution is not committed"), never as a
-//! silently-empty allowlist that happens to tolerate nothing, which would
-//! be indistinguishable from "the file loaded and genuinely lists
-//! nothing."
+// Loads and validates the nondeterministic-paths allowlist manifest used to
+// tolerate declared, expected content differences during verification.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -15,7 +8,7 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 struct NondeterministicPathsFile {
-    #[allow(dead_code)] // read for validation only; not consulted at runtime
+    #[allow(dead_code)]
     schema_version: String,
     paths: Vec<String>,
 }
@@ -34,7 +27,6 @@ pub enum ToleranceLoadError {
     },
 }
 
-/// A loaded, immutable nondeterminism allowlist. See module doc.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NondeterminismAllowlist {
     paths: HashSet<String>,
@@ -50,9 +42,6 @@ impl NondeterminismAllowlist {
         Self::parse(&contents, &path_str)
     }
 
-    /// `pub(crate)`: `verification`'s own tests build fixture allowlists
-    /// directly from inline TOML strings via this, rather than
-    /// round-tripping through a temp file just to reach `load`.
     pub(crate) fn parse(contents: &str, path_str: &str) -> Result<Self, ToleranceLoadError> {
         let file: NondeterministicPathsFile =
             toml::from_str(contents).map_err(|e| ToleranceLoadError::Parse {
@@ -64,8 +53,6 @@ impl NondeterminismAllowlist {
         })
     }
 
-    /// An allowlist that tolerates nothing — the correct default when no
-    /// base image manifest is configured, distinct from a load failure.
     pub fn empty() -> Self {
         NondeterminismAllowlist::default()
     }

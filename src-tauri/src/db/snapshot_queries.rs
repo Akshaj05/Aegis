@@ -1,10 +1,5 @@
-//! Typed queries against `snapshots` (§34). This is what Build order
-//! phase 5's `transaction::manager::Transaction::record_snapshot_sealed`
-//! deliberately left unwired — see that method's doc comment for why
-//! (setting `transactions.pre_execution_checkpoint_id` before any
-//! `snapshots` row existed was a real `FOREIGN KEY constraint failed` bug,
-//! not a hypothetical one). This module is what closes that gap: insert
-//! the `snapshots` row *first*, then the FK reference is satisfiable.
+// Typed database queries for creating snapshots and tracking their
+// recoverability.
 
 use rusqlite::params;
 
@@ -31,11 +26,6 @@ impl Database {
             .map(|_| ())
     }
 
-    /// §23.4: "update `snapshots.recoverable = 0` for the affected
-    /// checkpoint... in the same database transaction that records the
-    /// squash." Callers wrap this and `insert_audit_row`'s `snapshot_gc`
-    /// event in one SQLite transaction (`rusqlite::Connection::transaction`)
-    /// — this method itself is just the one `UPDATE`.
     pub fn mark_snapshot_unrecoverable(&self, id: &str, gc_reason: &str) -> rusqlite::Result<()> {
         self.conn
             .execute(
@@ -63,11 +53,6 @@ impl Database {
             })
     }
 
-    /// Build order phase 10: `get_storage_status`'s (§41)
-    /// `oldest_recoverable_transaction_id` field names a transaction, not
-    /// a checkpoint — the orchestrator has the oldest checkpoint id
-    /// readily in-memory (`LayerStack.checkpoints`) but needs this join to
-    /// report which transaction sealed it.
     pub fn get_snapshot_transaction_id(&self, id: &str) -> rusqlite::Result<Option<String>> {
         self.conn
             .query_row(
@@ -157,8 +142,6 @@ mod tests {
         )
         .unwrap();
 
-        // This is exactly what failed before this module existed —
-        // proof the ordering fix actually works end to end.
         db.update_transaction_checkpoint("txn_1", "ckpt_1").unwrap();
     }
 

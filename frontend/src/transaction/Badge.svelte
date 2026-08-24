@@ -1,4 +1,5 @@
 <script lang="ts">
+  // Small colored label/tag used to display category, risk, or status.
   export let label: string;
   export let tone: "safe" | "warn" | "danger" | "neutral" = "neutral";
 </script>
@@ -6,7 +7,6 @@
 <span class="badge {tone}">{label}</span>
 
 <style>
-  /* Low-opacity solid fill, no border — a tag, not a neon pill. */
   .badge {
     display: inline-block;
     padding: 0.2rem 0.55rem;

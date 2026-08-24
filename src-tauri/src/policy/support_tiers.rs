@@ -1,10 +1,5 @@
-//! Loads `policies/supported_commands.toml` and resolves a command name to
-//! its support tier (§19.1, §19.2). Self-validates on load — §28's
-//! "Policy engine failure" row: "A policy engine that cannot answer is
-//! treated as a Deny for everything, not an Allow" — so a malformed or
-//! missing file must surface as a load error the caller fails closed on,
-//! never as a silently-empty table that defaults everything to
-//! `Unsupported`-and-therefore-harmless.
+// Loads and self-validates policies/supported_commands.toml, resolving a
+// command name to its support tier and any partial-support divergence.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -15,7 +10,7 @@ use crate::policy::types::{ReasonCode, SupportTier};
 
 #[derive(Debug, Deserialize)]
 struct SupportedCommandsFile {
-    #[allow(dead_code)] // read for validation only; not consulted at runtime
+    #[allow(dead_code)]
     schema_version: String,
     tiers: TiersSection,
 }
@@ -69,10 +64,6 @@ pub enum SupportTierLoadError {
     UnknownDeniedReasonCode { path: String, reason_code: String },
 }
 
-/// A loaded, self-validated support-tier table. Immutable once
-/// constructed — reloading (e.g. on a config change) means constructing a
-/// new one, never mutating this in place, so a `PolicyEngine` holding an
-/// `Arc<SupportTierTable>` can't observe a table half-updated mid-read.
 #[derive(Debug)]
 pub struct SupportTierTable {
     tiers: HashMap<String, SupportTier>,
@@ -90,9 +81,6 @@ impl SupportTierTable {
         Self::parse(&contents, &path_str)
     }
 
-    /// `pub(crate)` rather than private: `policy::engine`'s tests build
-    /// fixture tables directly from inline TOML strings via this, rather
-    /// than round-tripping through a temp file just to reach `load`.
     pub(crate) fn parse(contents: &str, path_str: &str) -> Result<Self, SupportTierLoadError> {
         let file: SupportedCommandsFile =
             toml::from_str(contents).map_err(|e| SupportTierLoadError::Parse {
@@ -168,12 +156,6 @@ impl SupportTierTable {
         })
     }
 
-    /// Resolves a command name. Absent from every tier list resolves to
-    /// `Unsupported` by default, matching `supported_commands.toml`'s own
-    /// documented convention ("any command name not present... resolves
-    /// to unsupported by default") — §19's closed-world assumption is
-    /// about the *supported* set being closed, not about requiring every
-    /// possible command name to be enumerated as unsupported explicitly.
     pub fn resolve(&self, command_name: &str) -> SupportTier {
         self.tiers
             .get(command_name)
@@ -181,17 +163,10 @@ impl SupportTierTable {
             .unwrap_or(SupportTier::Unsupported)
     }
 
-    /// The reason code for a `Denied`-tier command (always
-    /// `DenyShellInvocation` for the MVP list, but read from the file
-    /// rather than hardcoded so the file stays the single source of
-    /// truth).
     pub fn denied_reason_code(&self) -> ReasonCode {
         self.denied_reason_code
     }
 
-    /// The documented semantic divergence for a `PartiallySupported`
-    /// command, if any (§19.1: "must never silently pretend to be
-    /// complete").
     pub fn divergence(&self, command_name: &str) -> Option<&str> {
         self.divergences.get(command_name).map(String::as_str)
     }
@@ -323,15 +298,12 @@ reason_code = "DENY_NONSENSE"
 
     #[test]
     fn the_real_policies_supported_commands_toml_loads_and_self_validates() {
-        // This is the actual file this project ships — load it for real,
-        // the same way the Policy Engine will, rather than only ever
-        // testing against inline fixtures that could drift from it.
+
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../policies/supported_commands.toml");
         let table = SupportTierTable::load(&path)
             .expect("policies/supported_commands.toml must load and self-validate");
 
-        // Spot-check a handful of entries from each tier, matching §19.2.
         assert_eq!(table.resolve("rm"), SupportTier::Supported);
         assert_eq!(table.resolve("ps"), SupportTier::PartiallySupported);
         assert_eq!(table.resolve("git"), SupportTier::Unsupported);

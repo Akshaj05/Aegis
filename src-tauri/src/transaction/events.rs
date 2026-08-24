@@ -1,17 +1,5 @@
-//! `TransactionEvent`, §29.2's schema, and the [`EventSink`] abstraction
-//! events are emitted through. See `docs/architecture.md` §29.
-//!
-//! §29.1: "Every state transition in §13 emits an event, unconditionally,
-//! before the next stage begins... There is no fast path that skips a
-//! stage." `TransactionManager` (`manager.rs`) is what enforces this in
-//! practice — every one of its transition methods emits before returning.
-//!
-//! A real Tauri-backed `EventSink` (emitting `transaction://event`, per
-//! §29.2) doesn't exist yet — it needs the `tauri` dependency, deferred
-//! since this dev environment lacks the system webview packages to build
-//! it (see `src-tauri/Cargo.toml`'s note, and `ipc/mod.rs`). `EventSink`
-//! is the seam that Tauri emitter slots into later without
-//! `TransactionManager` changing at all.
+// `TransactionEvent` type, its JSON wire representation, and the
+// `EventSink` abstraction events are emitted through.
 
 use chrono::{DateTime, Utc};
 
@@ -38,10 +26,6 @@ impl EventStatus {
     }
 }
 
-/// §29.2's event schema. `category`/`policy_risk_level` are `Option`
-/// because — same reasoning as `PolicyDecision` — they're meaningless
-/// before `POLICY_CHECK` produces them, and for a `RejectUnsupported`
-/// command they're never produced at all.
 #[derive(Debug, Clone)]
 pub struct TransactionEvent {
     pub transaction_id: TransactionId,
@@ -55,9 +39,6 @@ pub struct TransactionEvent {
     pub policy_risk_level: Option<RiskLevel>,
     pub metrics: serde_json::Value,
     pub message: String,
-    /// "A monotonic per-transaction counter so the frontend can detect
-    /// dropped or out-of-order events" (§29.2) — assigned by
-    /// `TransactionManager`, starting at 1 for each transaction.
     pub sequence: u64,
 }
 
@@ -79,9 +60,6 @@ fn risk_level_str(risk: Option<RiskLevel>) -> Option<&'static str> {
 }
 
 impl TransactionEvent {
-    /// The JSON shape §29.2 shows, for the Tauri `emit` payload and for
-    /// `transaction_events.metrics_json`-adjacent fields alike — one
-    /// serialization, used both places, so they can't drift apart.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "transaction_id": self.transaction_id.to_string(),
@@ -100,23 +78,16 @@ impl TransactionEvent {
     }
 }
 
-/// Where `TransactionEvent`s go once emitted, beyond the `transaction_events`
-/// table `TransactionManager` always writes to directly. Implementations:
-/// a live UI channel (Tauri, later), a test-collecting `Vec`, or nothing
-/// at all.
 pub trait EventSink {
     fn emit(&mut self, event: &TransactionEvent);
 }
 
-/// For production configurations with nothing else listening yet, and for
-/// tests that only care about the database side effects.
 pub struct NullEventSink;
 
 impl EventSink for NullEventSink {
     fn emit(&mut self, _event: &TransactionEvent) {}
 }
 
-/// For tests that need to inspect the emitted sequence.
 #[derive(Default)]
 pub struct CollectingEventSink {
     pub events: Vec<TransactionEvent>,

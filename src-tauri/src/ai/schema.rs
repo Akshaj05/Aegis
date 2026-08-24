@@ -1,32 +1,10 @@
-//! §21.6's structured output schema, plus the outgoing request shape the
-//! Rust core sends. Every enum here is closed (§21.7: "Enum-constrained
-//! fields... against closed taxonomies. Values outside the enum are
-//! rejected, never coerced") — `serde`'s derived `Deserialize` for a
-//! fieldless enum already refuses an unrecognized variant string, so a
-//! malformed `intent`/`recovery_recommendation.strategy` fails the whole
-//! parse rather than silently falling through to some default. That
-//! parse failure is exactly what `validation::validate` turns into
-//! "discarded entirely, never partially salvaged" (§21.7).
-//!
-//! `risk_level` reuses `policy::RiskLevel` rather than a second, parallel
-//! enum: §21.6 calls it "informational context" using the same closed
-//! taxonomy the Policy Engine already owns, and defining a duplicate
-//! would let the two drift apart with no compiler check that they mean
-//! the same thing.
+// Defines the structured AI plan schema (closed enums, plan fields) and
+// the outgoing AiRequest shape sent to an AI backend.
 
 use serde::{Deserialize, Serialize};
 
 use crate::policy::RiskLevel;
 
-/// The closed intent taxonomy. Covers `handlers/mod.rs`'s current command
-/// set (`Navigation`, `FileRead`, `FileWrite`, `DirectoryCreate`) plus the
-/// "must not be denied" corpus's known future
-/// operations (`RecursiveDelete`, `PermissionChange`, `OwnershipChange`,
-/// `PackageRemoval`) this schema needs to be ready for before those
-/// handlers exist — same "shape now, data later" posture as
-/// `policy::risk`'s `TOOLCHAIN_CRITICAL_PACKAGES`. `Other` is the
-/// deliberate escape hatch for anything not yet named, rather than
-/// forcing a parse failure for every future command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Intent {
@@ -41,7 +19,6 @@ pub enum Intent {
     Other,
 }
 
-/// §21.6's `recovery_recommendation.strategy` closed taxonomy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryStrategy {
@@ -60,17 +37,9 @@ pub struct RecoveryRecommendation {
 pub struct PredictedEffects {
     pub files_deleted_estimate: u32,
     pub directories_deleted_estimate: u32,
-    /// §21.6: "a claim the AI makes and the Rust core independently
-    /// verifies; a mismatch is logged as an AI-divergence event" — see
-    /// `ai::divergence`.
     pub escapes_sandbox: bool,
 }
 
-/// §21.6's full structured response, once parsed and enum-validated.
-/// Still needs [`validation::validate`](crate::ai::validation::validate)'s
-/// remaining checks (schema version, confidence clamping) before it's
-/// trusted — a value of this type coming from `serde_json::from_str`
-/// directly, bypassing `validate`, has skipped those.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AiPlan {
     pub schema_version: String,
@@ -87,14 +56,6 @@ pub struct AiPlan {
     pub explanation: String,
 }
 
-/// What the Rust core sends the AI backend — the parsed command plus the
-/// deterministic policy facts already computed (§21.1: "The Policy Engine
-/// computes its own `policy_risk_level` and verdict before the AI is
-/// invoked"). Deliberately **not** `policy::PolicyDecision` itself:
-/// serializing that struct directly would couple the wire format to
-/// `policy/`'s internal shape, and would need `Category`/`Verdict` to
-/// grow `Serialize` impls this crate has no other use for. This is a
-/// small, stable, purpose-built projection instead.
 #[derive(Debug, Clone, Serialize)]
 pub struct AiRequest {
     pub command_text: String,

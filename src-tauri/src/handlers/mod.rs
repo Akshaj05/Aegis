@@ -1,52 +1,5 @@
-//! Typed handlers, one per supported command. See `docs/architecture.md`
-//! §17.7, §19.3.
-//!
-//! Now run against [`crate::simulation::resolver::LayeredResolver`] rather
-//! than Phase 1's original [`crate::fs_abstraction::PlainDirBackend`] —
-//! that type's own module doc always said it was temporary, "not the
-//! permanent implementation," replaced once real path resolution existed.
-//! It now does: `LayeredResolver` composes `sandbox/worker/resolver.rs`'s
-//! `RootResolver`, so every read/write here inherits real
-//! `openat2`+`RESOLVE_BENEATH` kernel-enforced containment (§25.2) instead
-//! of `PlainDirBackend`'s string-validation-only checks. This is a
-//! genuine security upgrade, not just a refactor for layering's sake.
-//! `PlainDirBackend` itself is now unused anywhere in this crate and has
-//! been deleted from `fs_abstraction` rather than left as dead code.
-//!
-//! This module depends on `simulation::resolver` for `LayeredResolver`,
-//! while `simulation::manager` depends on this module's [`dispatch`] —
-//! deliberately bidirectional within the crate (Rust doesn't restrict
-//! intra-crate module dependency direction the way it restricts crate
-//! dependencies): `simulation/backend.rs`'s own module doc already said
-//! building the merged read/write API was "explicitly Build order phase
-//! 6's job," which put it in `simulation/`, and handlers are the natural
-//! thing that API serves.
-//!
-//! Still Phase-1-tier scope: `pwd, cd, mkdir, touch, ls, cat, echo, rm`.
-//! `rm` is the first handler whose predicted/actual diffs can contain
-//! deletions — it relies on `LayeredResolver::remove`'s whiteout-marker
-//! design (see that module's doc comment) to represent "this path, which
-//! may live in a lower snapshot layer, no longer exists" without a real
-//! kernel overlay filesystem. The remaining commands (`rmdir, cp, mv,
-//! chmod, chown, ln, grep, find, head, tail, wc, mkfifo, export, env,
-//! which, history`) and the process-affecting partially-supported
-//! commands (`ps`, `kill`) are still not implemented — same reasoning as
-//! before: adding them is direct repetition of this module's pattern, not
-//! a new design question.
-//!
-//! [`dispatch`] is still not the architecture's real command-dispatch
-//! layer — §19's support-tier routing (now real, in `policy::support_tiers`
-//! since Build order phase 4) still isn't wired to this dispatcher. It
-//! returns exit code 127 for anything it doesn't recognize, matching
-//! POSIX shell behavior for a missing command (§17.4) as a placeholder.
-//!
-//! **This pass is what makes §19.3/§22.2's "no separate dry-run
-//! implementation" invariant load-bearing for real**: [`dispatch`] is now
-//! called both by `simulation::manager` (writing to a disposable transient
-//! layer) and will be called by `executor/` once it exists (Build order
-//! phase 6-7, writing to the persistent active write layer) — same
-//! function, same code, differing only in which `LayeredResolver` (built
-//! from a different `WriteTarget`, per `snapshot::backend`) it's given.
+// Typed command handlers and the dispatch table that routes a parsed
+// command name to its handler, applying output redirection afterward.
 
 mod coreutils_proc;
 mod fs_ext;
@@ -85,14 +38,6 @@ impl CommandResult {
     }
 }
 
-/// Phase-1-tier dispatcher, now covering the broader coreutils-backed
-/// command set added alongside `handlers/fs_ext.rs`, `handlers/
-/// text_filters.rs`, and `handlers/info.rs` — see their module docs for
-/// how each command actually gets its filesystem/subprocess access.
-/// `redirections` (`>`/`>>`) is applied uniformly to every command's
-/// stdout after it runs, via [`apply_redirections`] — this is the first
-/// consumer of `ParsedCommand::redirections` anywhere in the crate; it was
-/// previously parsed but never acted on.
 pub fn dispatch(
     name: &str,
     args: &[Arg],
@@ -149,15 +94,6 @@ fn dispatch_command(
     }
 }
 
-/// Applies `>`/`>>` redirection to `result.stdout`, writing it through
-/// [`LayeredResolver::write_file`] and clearing it from the terminal
-/// output (matching real shell behavior: `echo hi > file` prints nothing
-/// to the terminal). `<` (input redirection) is refused with a clear
-/// error rather than silently ignored — no handler in this crate reads
-/// stdin yet (§ module doc), so there is nothing correct to wire it to.
-/// Applied regardless of `result`'s own exit code, matching a real
-/// shell's redirection setup happening before the command's own success
-/// or failure is known.
 fn apply_redirections(
     result: &mut CommandResult,
     redirections: &[Redirection],
@@ -197,12 +133,6 @@ fn apply_redirections(
     }
 }
 
-/// Resolves a path argument against the session's cwd, handling `..`/`.`
-/// and a leading `/` the way a real shell would (§17.3). See
-/// [`SandboxPath::resolve_relative`] for why this differs from `parse`.
-/// This remains a redundant, defense-in-depth second check (§25.1) — the
-/// primary control is `LayeredResolver`'s underlying `openat2`/
-/// `RESOLVE_BENEATH`, not this string-level normalization.
 fn resolve_arg(session: &TerminalSession, raw: &str) -> Result<SandboxPath, String> {
     session
         .cwd()
@@ -221,9 +151,7 @@ fn cmd_cd(
 ) -> CommandResult {
     let target_raw = match args.first() {
         Some(a) => a.as_str(),
-        None => "/", // bare `cd` goes to the sandbox root; SafeShell has no
-                     // real per-user HOME directory concept beyond the
-                     // seeded $HOME value, so root is the defined default.
+        None => "/",
     };
 
     let target = match resolve_arg(session, target_raw) {
@@ -352,11 +280,6 @@ fn cmd_cat(session: &TerminalSession, resolver: &LayeredResolver, args: &[Arg]) 
             }
         };
         match resolver.read_file(target.as_str()) {
-            // Real `cat` is byte-oriented; SafeShell's terminal output is
-            // text (§17.4's `CommandResult` is `String`-typed). Lossy
-            // UTF-8 conversion is a documented, deliberate simplification
-            // for this command set — no handler yet needs to round-trip
-            // arbitrary binary content.
             Ok(bytes) => stdout.push_str(&String::from_utf8_lossy(&bytes)),
             Err(e) => {
                 stderr.push_str(&format!("cat: {}: {e}\n", arg.as_str()));
@@ -372,11 +295,6 @@ fn cmd_cat(session: &TerminalSession, resolver: &LayeredResolver, args: &[Arg]) 
     }
 }
 
-/// Matches `name` against `pattern`, where `pattern` may contain any
-/// number of `*` wildcards (each matching zero or more characters) and no
-/// other special syntax — `?`/character classes/brace expansion are not
-/// part of `parser`'s documented "basic `*` glob expansion" scope
-/// (`parser::mod` module doc, §17.2).
 fn glob_match(pattern: &str, name: &str) -> bool {
     let parts: Vec<&str> = pattern.split('*').collect();
     if parts.len() == 1 {
@@ -404,17 +322,6 @@ fn glob_match(pattern: &str, name: &str) -> bool {
     true
 }
 
-/// Expands a `*`-containing final path component against `parent`'s real
-/// directory listing (§17.2's "basic `*` glob expansion... scoped to the
-/// immediate directory" — a wildcard earlier in the path, e.g. `/tmp/*/f`,
-/// is not supported, matching that documented scope). Returns `None` when
-/// `name` has no `*` at all, so callers fall back to treating it as a
-/// single literal target. An empty match list (nothing in `parent` fits
-/// the pattern) is returned as `Some(vec![])` rather than falling back to
-/// the literal pattern — real shells behave the same only under
-/// `nullglob`, but silently operating on a literal `*`/`file-*.log`
-/// argument is never useful for SafeShell's typed handlers, and every
-/// caller here already treats "nothing to do" as success.
 fn expand_glob(
     resolver: &LayeredResolver,
     parent: &SandboxPath,
@@ -432,13 +339,6 @@ fn expand_glob(
     Some(matches)
 }
 
-/// `rm [-r|-R] [-f] TARGET...`. Flag parsing deliberately mirrors
-/// `policy::risk::has_short_flag`'s narrow rule (a single leading `-`
-/// followed by letters — `-rf`/`-fr`/`-r`/`-f`, not `--recursive`) so the
-/// same command the Policy Engine classified as HIGH/CRITICAL for
-/// recursion is the same command this handler treats as recursive; a
-/// mismatch between the two would mean the risk shown to the user and the
-/// actual blast radius executed could disagree.
 fn cmd_rm(session: &TerminalSession, resolver: &LayeredResolver, args: &[Arg]) -> CommandResult {
     let mut recursive = false;
     let mut force = false;
@@ -460,8 +360,6 @@ fn cmd_rm(session: &TerminalSession, resolver: &LayeredResolver, args: &[Arg]) -
     }
 
     if targets.is_empty() {
-        // Real `rm -f` with no operands is a silent no-op; without `-f`
-        // it is a usage error.
         return if force {
             CommandResult::ok("")
         } else {

@@ -1,25 +1,6 @@
-//! Thin, typed Tauri command handlers — every function here does exactly
-//! one thing: convert its Tauri-supplied arguments, call straight into
-//! [`crate::orchestrator`], and convert the result back into something
-//! `serde` can hand across the IPC boundary. See `docs/architecture.md`
-//! §30 for the exact command list and §41 for each one's request/response
-//! shape; every command below is named and shaped to match those sections
-//! directly, not approximated.
-//!
-//! No command here accepts a filesystem path or a shell string destined
-//! for execution (§30's constraint) — `submit_command`'s `line` is the
-//! one command-line string in this surface, and it only ever reaches
-//! `parser::parse_line` inside `orchestrator::submit_command`, never an
-//! interpreter (docs/CLAUDE.md invariant #15). `restore_to_checkpoint`'s
-//! `checkpoint_id` is validated against the caller's own live, retained
-//! `LayerStack` before anything touches disk (`orchestrator::restore_to_checkpoint`) —
-//! an unknown or garbage-collected id is refused there, not here.
-//!
-//! `capabilities/default.json` grants only `core:default` — no fs/shell/
-//! dialog plugin is declared anywhere in this crate, so there is nothing
-//! broader for the webview to reach even if it wanted to (§30: "the
-//! webview has no filesystem or shell API surface enabled at the Tauri
-//! configuration level").
+// Tauri IPC command handlers: converts frontend-supplied arguments into
+// calls into the orchestrator and converts results back into serde-friendly
+// responses for the webview.
 
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -29,10 +10,6 @@ use crate::orchestrator::{self, AppState, OrchestratorError, StorageStatus, Tran
 use crate::rollback::RollbackOutcome;
 use crate::transaction::events::{EventSink, TransactionEvent};
 
-/// Emits §29.2's `transaction://event` — one instance created per command
-/// invocation, wrapping a borrowed `AppHandle` rather than owning one, so
-/// it can be constructed as a cheap local alongside
-/// [`TerminalOutputEmitter`] without either borrowing the other.
 struct TxEventEmitter<'a>(&'a AppHandle);
 
 impl EventSink for TxEventEmitter<'_> {
@@ -41,10 +18,6 @@ impl EventSink for TxEventEmitter<'_> {
     }
 }
 
-/// Emits the second channel §29.2 names, `terminal://output` — see
-/// `orchestrator::TerminalOutputEvent`'s own doc comment for why this is
-/// a distinct trait/channel from [`TxEventEmitter`] rather than folded
-/// into it.
 struct TerminalOutputEmitter<'a>(&'a AppHandle);
 
 impl orchestrator::TerminalOutputSink for TerminalOutputEmitter<'_> {
@@ -65,22 +38,6 @@ fn to_string_err(e: OrchestratorError) -> String {
     e.to_string()
 }
 
-/// Every command below hands its actual work to this rather than running
-/// it inline. A plain (non-`async`) `#[tauri::command]` fn is invoked by
-/// Tauri directly on the main/webview thread — fine for the cheap ones,
-/// but `orchestrator::submit_command`/`approve_transaction` run the full
-/// synchronous pipeline including a real AI backend HTTP call
-/// (`OllamaBackend::DEFAULT_TIMEOUT` is 30s, and real local generation
-/// has been measured around 9s), and `undo_last_transaction`/
-/// `restore_to_checkpoint`/the quarantine-recovery commands touch real
-/// filesystem restore work. Any of those running on the main thread
-/// freezes the whole window for their duration — the OS's own "app not
-/// responding" watchdog, not a bug in the pipeline itself. Offloading via
-/// `spawn_blocking` keeps every command's own internals exactly as
-/// synchronous as the rest of this crate (`orchestrator`/`executor`/
-/// `rollback` stay plain, un-async code, matching `ai::backend`'s "nothing
-/// else in this crate is async" design note) while keeping the webview's
-/// event loop free to keep rendering and responding to input.
 async fn run_blocking<F, T>(f: F) -> Result<T, String>
 where
     F: FnOnce() -> Result<T, String> + Send + 'static,
@@ -99,12 +56,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    /// The actual mechanism the "app stopped responding" fix depends on:
-    /// `run_blocking`'s closure must execute on a thread other than the
-    /// one that called it, exactly like `spawn_blocking`'s documented
-    /// contract — proving this in-process is what stands in for
-    /// confirming the real app's main/webview thread is never the one
-    /// running the pipeline.
     #[test]
     fn run_blocking_executes_the_closure_off_the_calling_thread() {
         let calling_thread = std::thread::current().id();
@@ -114,11 +65,6 @@ mod tests {
         assert_eq!(ran_elsewhere, Ok(true));
     }
 
-    /// A slow `run_blocking` call (standing in for a real ~16s AI-backed
-    /// pipeline run) must not prevent a second, concurrently spawned task
-    /// from making progress — the property that keeps the app able to
-    /// keep handling other IPC calls (and, in the real app, keeps the
-    /// webview's own event loop unblocked) while one command is slow.
     #[test]
     fn a_slow_run_blocking_call_does_not_starve_a_concurrent_task() {
         use std::time::Instant;
@@ -127,8 +73,7 @@ mod tests {
         let fast_done2 = fast_done.clone();
 
         tauri::async_runtime::block_on(async move {
-            // Both are spawned onto the runtime immediately — scheduling
-            // starts here, not when each is later `.await`ed.
+
             let slow = run_blocking(move || {
                 std::thread::sleep(Duration::from_millis(300));
                 Ok::<_, String>(())
@@ -138,10 +83,6 @@ mod tests {
                 fast_done2.store(true, Ordering::SeqCst);
             });
 
-            // Awaiting the fast task first proves it isn't queued behind
-            // the slow one: if `run_blocking` ran inline on this same
-            // task instead of on a separate blocking thread, this await
-            // would not return until the 300ms slow closure finished.
             let start = Instant::now();
             fast.await.unwrap();
             assert!(
@@ -258,8 +199,6 @@ pub async fn reject_transaction(app: AppHandle, transaction_id: String) -> Resul
     .await
 }
 
-/// See `orchestrator`'s module doc for exactly what this can and can't
-/// interrupt in this pass.
 #[tauri::command]
 pub async fn interrupt_command(app: AppHandle, session_id: String) -> Result<Ack, String> {
     run_blocking(move || {
@@ -272,9 +211,6 @@ pub async fn interrupt_command(app: AppHandle, session_id: String) -> Result<Ack
     .await
 }
 
-/// §41: `{ ok: true, restored_checkpoint_id }` or
-/// `{ ok: false, reason: "no_recoverable_checkpoint" }` — the latter is a
-/// normal, expected outcome (nothing to undo yet), not an IPC error.
 #[tauri::command]
 pub async fn undo_last_transaction(
     app: AppHandle,
@@ -295,9 +231,6 @@ pub async fn undo_last_transaction(
     .await
 }
 
-/// §27.4's first quarantine recovery action, exposed over IPC so a
-/// quarantined session (a rollback failure, §13.3's "never silent") isn't
-/// a dead end the UI has no way out of.
 #[tauri::command]
 pub async fn quarantine_recovery_restore_to_newest(
     app: AppHandle,
@@ -312,7 +245,6 @@ pub async fn quarantine_recovery_restore_to_newest(
     .await
 }
 
-/// §27.4's second quarantine recovery action.
 #[tauri::command]
 pub async fn quarantine_recovery_reset_to_base(
     app: AppHandle,

@@ -1,33 +1,9 @@
-//! Path types and resolution. See `docs/architecture.md` §25.
-//!
-//! `SandboxPath` and `HostManagedPath` are distinct types with no conversion
-//! between them (docs/CLAUDE.md invariant #17). `HostManagedPath` has no
-//! constructor that accepts terminal input.
-//!
-//! Build order phase 1's `PlainDirBackend` — the original, deliberately
-//! temporary "resolve a `SandboxPath` against a host root with only
-//! string validation" scaffold this module's doc comment always said
-//! would be replaced — is gone as of Build order phase 6. Every caller
-//! now goes through `sandbox/worker/resolver.rs`'s `RootResolver` (real
-//! `openat2`+`RESOLVE_BENEATH` kernel-enforced containment, §25.2),
-//! composed into layered form by `simulation::resolver::LayeredResolver`.
-//! Deleted outright rather than left as unused code, per its own module
-//! doc's promise that it "must not become the permanent implementation."
-//!
-//! `HostManagedPath` is kept even though nothing in this crate constructs
-//! one yet (`RootResolver::open` still takes a plain `&Path`) — it
-//! documents a real invariant other modules' comments already reference
-//! by name, and upgrading `RootResolver::open` to require one instead of
-//! `&Path` is a small, self-contained follow-up, not a reason to remove
-//! the type now.
+// Path types and resolution: SandboxPath (validated, sandbox-relative
+// paths) and HostManagedPath (host paths derived only from configuration).
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// A path relative to the SafeShell environment root. Never absolute on the
-/// host, never containing `..` or NUL bytes. Cannot be converted to a
-/// [`HostManagedPath`] — the two types intentionally share no conversion
-/// path (docs/CLAUDE.md invariant #17).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SandboxPath(String);
 
@@ -44,11 +20,6 @@ pub enum SandboxPathError {
 }
 
 impl SandboxPath {
-    /// Parses and validates a path relative to the sandbox root. Rejects
-    /// `..` components, empty components, and NUL bytes. A leading `/` is
-    /// accepted and treated as "relative to the sandbox root" (the sandbox
-    /// root *is* what the sandboxed context sees as `/`, per §14.5); it is
-    /// not resolved against anything on the host.
     pub fn parse(input: &str) -> Result<Self, SandboxPathError> {
         if input.is_empty() {
             return Err(SandboxPathError::Empty);
@@ -69,7 +40,6 @@ impl SandboxPath {
         Ok(SandboxPath(normalized_parts.join("/")))
     }
 
-    /// The sandbox root itself (`/` inside the sandboxed view).
     pub fn root() -> Self {
         SandboxPath(String::new())
     }
@@ -82,9 +52,6 @@ impl SandboxPath {
         &self.0
     }
 
-    /// Joins a single additional component, which is itself validated (must
-    /// not be `..`, empty, or contain `/` — use [`SandboxPath::parse`] for
-    /// multi-component input).
     pub fn join(&self, component: &str) -> Result<Self, SandboxPathError> {
         if component.is_empty() {
             return Err(SandboxPathError::EmptyComponent(component.to_string()));
@@ -102,7 +69,6 @@ impl SandboxPath {
         }
     }
 
-    /// The parent sandbox path, or `None` if this is already the root.
     pub fn parent(&self) -> Option<Self> {
         if self.0.is_empty() {
             return None;
@@ -121,24 +87,6 @@ impl SandboxPath {
         }
     }
 
-    /// Resolves a raw, user-typed path (as given to `cd`, or as a path
-    /// argument to any handler) against this path as the base, the way a
-    /// real shell resolves navigation: `..` pops the last component instead
-    /// of being rejected, and a leading `/` restarts from the sandbox root.
-    /// `..` above the sandbox root is clamped to the root rather than
-    /// erroring, matching what `cd ..` does at `/` in a real chroot — there
-    /// is no path above the root to go to (§14.6).
-    ///
-    /// This is distinct from [`SandboxPath::parse`], which validates an
-    /// already-resolved, canonical path and rejects `..` outright; `parse`
-    /// is for consuming a path that is supposed to already be in resolved
-    /// form (e.g. a stored diff entry), not for interpreting fresh user
-    /// input.
-    ///
-    /// This performs no I/O and is not itself a security boundary — it is
-    /// the Phase 1 stand-in for cwd bookkeeping. The structural containment
-    /// guarantee comes from the sandbox worker's `openat2`/`RESOLVE_BENEATH`
-    /// resolution (§25.2), introduced in Build order phase 2.
     pub fn resolve_relative(&self, raw: &str) -> Result<Self, SandboxPathError> {
         if raw.contains('\0') {
             return Err(SandboxPathError::ContainsNul);
@@ -170,19 +118,10 @@ impl fmt::Display for SandboxPath {
     }
 }
 
-/// A host filesystem path. Constructible only from SafeShell's own
-/// configuration (base image location, database path, layer directories) —
-/// never from user command input, and never by joining a
-/// [`SandboxPath`] onto an existing host path in general application code.
-/// The lack of a `From<SandboxPath>` impl, or of any constructor accepting
-/// a caller-supplied string, is the enforcement mechanism
-/// (docs/CLAUDE.md invariant #17).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostManagedPath(PathBuf);
 
 impl HostManagedPath {
-    /// Construct from a path SafeShell itself derived from configuration
-    /// (e.g. `$XDG_DATA_HOME/safeshell/...`), not from terminal input.
     pub fn from_config(path: PathBuf) -> Self {
         HostManagedPath(path)
     }

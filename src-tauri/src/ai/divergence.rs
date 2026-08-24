@@ -1,13 +1,6 @@
-//! §21.7's independent cross-checking: "`affected_resources` is
-//! independently recomputed by the parser and diff engine... flagged
-//! visibly when it diverges" and §21.6's "`escapes_sandbox` is a claim
-//! the AI makes and the Rust core independently verifies; a mismatch is
-//! logged as an AI-divergence event." Neither check ever changes a
-//! routing decision (§28: "AI claims higher risk than policy — never
-//! de-escalates anything... divergence recorded... default is to display
-//! the divergence to the user without changing routing") — these
-//! functions only ever produce a [`DivergenceFinding`] to record and
-//! display, never a value anything else branches on.
+// Detects and records divergence between what the AI plan claims and what
+// the deterministic policy/simulation results actually show, for display
+// only — never used to change a routing decision.
 
 use std::collections::HashSet;
 
@@ -27,15 +20,6 @@ pub struct DivergenceFinding {
     pub ground_truth: String,
 }
 
-/// Checkable the moment an `AiPlan` is validated, before simulation ever
-/// runs: a transaction only reaches the `AI_ANALYSIS` state at all when
-/// the Policy Engine's verdict was `Allow` or `RequireApproval` (§13.2:
-/// `POLICY_CHECK -> DENIED | AI_ANALYSIS` — a `Deny` verdict exits
-/// straight to the terminal `DENIED` state and never reaches here). So
-/// the ground truth at this point is structurally always "does not
-/// escape the sandbox" — an `AiPlan` claiming `escapes_sandbox: true` for
-/// an operation the Policy Engine already determined is safely
-/// containable is exactly the divergence §21.6 exists to catch.
 pub fn detect_escapes_sandbox_divergence(plan: &AiPlan) -> Option<DivergenceFinding> {
     if plan.predicted_effects.escapes_sandbox {
         Some(DivergenceFinding {
@@ -48,15 +32,6 @@ pub fn detect_escapes_sandbox_divergence(plan: &AiPlan) -> Option<DivergenceFind
     }
 }
 
-/// Only meaningful once a `SimulationDiff` exists (post-`SIMULATING`) —
-/// `affected_resources` is the AI's guess made before simulation ran,
-/// compared against what the deterministic simulation pass actually
-/// found. Set comparison, not exact-match: the AI's list is prose-derived
-/// and may reasonably include a parent directory a file lives under, so
-/// only a *complete absence of overlap* in either direction is reported,
-/// mirroring how `verification::verify`'s own path-set comparison treats
-/// "reported at all" as the meaningful signal rather than exact
-/// formatting.
 pub fn detect_affected_resources_divergence(
     plan: &AiPlan,
     diff: &SimulationDiff,

@@ -1,10 +1,5 @@
-// Thin wrapper over `@tauri-apps/api` — the entire IPC surface this
-// frontend is allowed to use, matching `docs/architecture.md` §30's
-// command list exactly. Nothing outside this file should call `invoke`
-// or `listen` directly (docs/CLAUDE.md: "Frontend is a pure renderer of
-// the event stream. No hardcoded timelines, no client-side risk logic,
-// no derived security decisions.") — every decision behind these calls
-// was already made by the Rust core before the response/event arrives.
+// Wrapper over the Tauri IPC surface: exposes typed command invocations
+// and event subscriptions used by the rest of the frontend.
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
@@ -53,7 +48,6 @@ export const api = {
     invoke<StorageStatus>("get_storage_status", { sessionId }),
 };
 
-/** §29.1: "Every state transition... emits an event, unconditionally." */
 export function onTransactionEvent(
   handler: (event: TransactionEvent) => void,
 ): Promise<UnlistenFn> {

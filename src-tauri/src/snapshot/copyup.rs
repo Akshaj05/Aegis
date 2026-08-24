@@ -1,26 +1,6 @@
-//! `CopyUpSimulationBackend` — the MVP last-resort `SimulationBackend`
-//! fallback (§14.4): "Directory-based copy-on-write with an explicit
-//! changed-path journal. Correct but with higher snapshot cost; used only
-//! when neither overlay option passes the self-test."
-//!
-//! Unlike `overlayfs.rs`/`fuse_overlay.rs`, this backend needs no kernel
-//! or FUSE support at all — every operation here is a plain directory
-//! create/rename/remove, so this is the one `SimulationBackend`
-//! implementation that's **fully real-tested** in this project's
-//! development environment (no unverified-here caveat, unlike almost
-//! everything in `sandbox/`).
-//!
-//! "Explicit changed-path journal" (§14.4's phrase) is not yet built in
-//! this pass: sealing renames the whole active-write directory into a
-//! checkpoint wholesale rather than tracking a minimal changed-file list,
-//! and `mount_view` returns the layer directories for a caller to search
-//! itself rather than a merged read/write API with whiteout support for
-//! deletions. Both are real future work — see `backend.rs`'s module docs
-//! for why the merged read/write API specifically is scoped to Build
-//! order phase 6, not this one. What *is* real here is the layer
-//! lifecycle itself: create, seal, discard, restore, size — which is what
-//! Build order phase 3 ("layer model... stack management") actually asks
-//! for.
+// Directory-based copy-on-write `SimulationBackend` implementation: layer
+// lifecycle (create, seal, discard, restore, size) via plain rename/create/
+// remove filesystem operations, with no kernel or FUSE dependency.
 
 use std::path::{Path, PathBuf};
 
@@ -31,13 +11,6 @@ use crate::snapshot::backend::{
     TransientLayerId, WriteTarget,
 };
 
-/// Manages one session's on-disk layers under `layers_root`:
-/// `layers_root/checkpoints/<ulid>/` and `layers_root/transient/<ulid>/`.
-/// The consolidated base and the active write layer are **not** owned by
-/// this struct — they live wherever the caller's `LayerStack` says (the
-/// base is seed content this backend never creates or deletes; the active
-/// write layer's *directory* is created here on `new`/`restore_to`/`seal`,
-/// but its *path* is caller-chosen).
 pub struct CopyUpSimulationBackend {
     layers_root: PathBuf,
 }
@@ -49,9 +22,6 @@ impl CopyUpSimulationBackend {
         Ok(CopyUpSimulationBackend { layers_root })
     }
 
-    /// `pub(crate)` so `snapshot::retention`'s and `rollback`'s tests can
-    /// assert a checkpoint's own directory is actually gone (or intact),
-    /// not just absent-or-present in `LayerStack.checkpoints`.
     pub(crate) fn checkpoint_path(&self, id: CheckpointId) -> PathBuf {
         self.layers_root.join("checkpoints").join(id.0.to_string())
     }
@@ -99,10 +69,6 @@ impl SimulationBackend for CopyUpSimulationBackend {
         let id = CheckpointId(Ulid::new());
         let checkpoint_path = self.checkpoint_path(id);
 
-        // Seal by rename (§23.1: "not a copy of the filesystem" — a
-        // rename within the same filesystem is O(1), not proportional to
-        // content size), then create a fresh empty active write layer at
-        // the *original* path.
         std::fs::rename(&layers.active_write, &checkpoint_path)?;
         std::fs::create_dir(&layers.active_write)?;
 
@@ -133,8 +99,6 @@ impl SimulationBackend for CopyUpSimulationBackend {
         layers: &mut LayerStack,
         id: Option<CheckpointId>,
     ) -> Result<(), SimulationError> {
-        // `None` -> discard from index 0 (every checkpoint). `Some(id)` ->
-        // discard everything *after* that checkpoint's index, keeping it.
         let discard_from = match id {
             None => 0,
             Some(id) => {
@@ -147,17 +111,10 @@ impl SimulationBackend for CopyUpSimulationBackend {
             }
         };
 
-        // Strictly LIFO, matching §23.5. `drain` here both removes them
-        // from the stack and gives us the paths to delete.
         for (_, path) in layers.checkpoints.drain(discard_from..) {
             std::fs::remove_dir_all(&path)?;
         }
 
-        // The current active write layer is discarded and replaced with a
-        // fresh empty one *above* the target checkpoint — §14.3's
-        // "Rollback: discard W' entirely and create a fresh empty write
-        // layer above C_k." The target checkpoint itself is never
-        // modified; it stays sealed.
         if layers.active_write.is_dir() {
             std::fs::remove_dir_all(&layers.active_write)?;
         }
@@ -175,10 +132,6 @@ impl SimulationBackend for CopyUpSimulationBackend {
     }
 }
 
-/// `pub(super)` so `overlayfs.rs` (which has no mount-independent way to
-/// size a directory of its own — the size of a checkpoint is the same
-/// question regardless of which backend mounts it) can reuse this instead
-/// of duplicating a directory-walk.
 pub(super) fn directory_size_bytes(path: &Path) -> std::io::Result<u64> {
     let mut total = 0u64;
     for entry in std::fs::read_dir(path)? {
@@ -317,7 +270,6 @@ mod tests {
                 .is_none(),
             "active write layer must be reset to empty after restore"
         );
-        // The target checkpoint itself is untouched.
         assert_eq!(
             std::fs::read_to_string(backend.checkpoint_path(id1).join("a.txt")).unwrap(),
             "1"

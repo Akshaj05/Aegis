@@ -1,40 +1,12 @@
-//! Deterministic Rollback Engine — the only component that performs
-//! recovery. See `docs/architecture.md` §27. Must never depend on `ai/`
-//! (docs/CLAUDE.md invariant #7; checked by `tests/policy_engine_tests/main.rs`'s
-//! `guarded_modules_never_reference_ai_module`). Its only real input is a
-//! `CheckpointId` — this module takes that from `snapshot::backend::LayerStack`,
-//! which the Snapshot Manager (`snapshot/`) owns.
-//!
-//! Three distinct operations, per §27.1-§27.2:
-//! - [`automatic_rollback`] — triggered by verification mismatch or
-//!   execution failure. Keeps the newest checkpoint; discards only the
-//!   active write layer.
-//! - [`undo_last_transaction`] — user-initiated, on a *committed*
-//!   transaction. Discards the newest checkpoint too, landing one further
-//!   back. Strictly LIFO (§23.5); `Err(NoRecoverableCheckpoint)` is the
-//!   real `{ ok: false, reason: "no_recoverable_checkpoint" }` case §41
-//!   documents.
-//! - [`quarantine_recovery_restore_to_newest`] /
-//!   [`quarantine_recovery_reset_to_base`] — the two explicit actions
-//!   §27.4 offers after a `ROLLBACK_FAILED` quarantine. Named for exactly
-//!   what they are rather than left as bare `restore_to` calls at the call
-//!   site, since which one a quarantined session's user picks matters and
-//!   should be unambiguous in the code that offers them.
-//!
-//! Both `automatic_rollback` and `undo_last_transaction` perform §27.3's
-//! post-rollback verification (the active write layer is empty) before
-//! reporting success — a restore that "succeeded" by `SimulationBackend`'s
-//! own account but left an unexpected non-empty write layer is exactly
-//! the kind of silent-corruption case §13.3's "rollback failure is never
-//! silent" invariant exists to catch, not something to trust blindly.
+// Deterministic rollback engine: restores the sandbox environment to a
+// prior checkpoint (or the consolidated base) and verifies the active
+// write layer is empty afterward.
 
 use crate::snapshot::backend::{CheckpointId, LayerStack, SimulationBackend, SimulationError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RollbackOutcome {
     pub success: bool,
-    /// The checkpoint the environment now sits above, if any (`None` only
-    /// when rolled all the way back to the consolidated base).
     pub restored_checkpoint_id: Option<CheckpointId>,
     pub failure_detail: Option<String>,
 }
@@ -43,10 +15,6 @@ pub struct RollbackOutcome {
 #[error("no recoverable checkpoint")]
 pub struct NoRecoverableCheckpoint;
 
-/// §27.2: "discard the active write layer created after the pre-execution
-/// snapshot, and mount a fresh empty write layer above the sealed
-/// checkpoint C_k." `C_k` is whatever the newest checkpoint already is —
-/// this never removes a checkpoint, only resets the write layer above it.
 pub fn automatic_rollback(
     backend: &dyn SimulationBackend,
     layers: &mut LayerStack,
@@ -55,11 +23,6 @@ pub fn automatic_rollback(
     restore_and_verify(backend, layers, target)
 }
 
-/// §27.2: "discard the current write layer and the topmost sealed
-/// checkpoint, then create a fresh write layer above the checkpoint
-/// beneath." Strictly LIFO. `Err` when there is nothing to undo at all
-/// (§41's `no_recoverable_checkpoint`) — distinct from a rollback that was
-/// *attempted* and failed (`Ok(RollbackOutcome { success: false, .. })`).
 pub fn undo_last_transaction(
     backend: &dyn SimulationBackend,
     layers: &mut LayerStack,
@@ -75,11 +38,6 @@ pub fn undo_last_transaction(
     Ok(restore_and_verify(backend, layers, target))
 }
 
-/// §27.4's first quarantine recovery action: "restore to the newest
-/// verifiable retained checkpoint." Equivalent to [`automatic_rollback`]
-/// mechanically, but named for what a quarantined session's user is
-/// actually choosing, not left as an unlabeled `restore_to` call at the
-/// site that offers it.
 pub fn quarantine_recovery_restore_to_newest(
     backend: &dyn SimulationBackend,
     layers: &mut LayerStack,
@@ -87,8 +45,6 @@ pub fn quarantine_recovery_restore_to_newest(
     automatic_rollback(backend, layers)
 }
 
-/// §27.4's second quarantine recovery action: "reset the environment to
-/// the consolidated base."
 pub fn quarantine_recovery_reset_to_base(
     backend: &dyn SimulationBackend,
     layers: &mut LayerStack,
@@ -96,15 +52,6 @@ pub fn quarantine_recovery_reset_to_base(
     restore_and_verify(backend, layers, None)
 }
 
-/// §30/§41's `restore_to_checkpoint` IPC command: a user-selected
-/// checkpoint from this session's retained history, distinct from the two
-/// named quarantine recovery targets above. Callers (the orchestrator,
-/// `orchestrator/mod.rs`) validate `checkpoint_id` is a member of the
-/// caller's own `LayerStack.checkpoints` before calling this — unknown or
-/// garbage-collected ids are refused there, per §30's constraint, not
-/// here (this function has no way to distinguish "never existed" from
-/// "already discarded" once given a bare id; the caller's live stack membership
-/// check is what actually enforces the constraint).
 pub fn restore_to_checkpoint(
     backend: &dyn SimulationBackend,
     layers: &mut LayerStack,

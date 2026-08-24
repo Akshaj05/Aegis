@@ -1,31 +1,10 @@
-//! Loads `simulated-root-image/mock-package-db.json` — the mock package
-//! database `handlers::pkg`'s `safeshell-pkg` handler reads/mutates,
-//! per-session. Same posture as `verification::tolerance`'s
-//! `NondeterminismAllowlist::load` and `policy::support_tiers`'s
-//! `SupportTierTable::load`: self-validates on load, fails closed on a
-//! malformed file rather than silently starting every session with an
-//! empty package list that happens to look the same as "genuinely no
-//! packages."
-//!
-//! This file was real, well-formed seed data sitting unread since Build
-//! order phase 3 (its own `_comment` field said so: "No handler reads
-//! this file yet... a disclosed gap, not a silent one") — this module is
-//! what closes that gap.
+// Loads and validates the mock package database (mock-package-db.json)
+// used by the safeshell-pkg handler to track a session's installed packages.
 
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-/// One entry in the mock package database. `essential` mirrors real
-/// package managers' "removing this breaks the system" flag — SafeShell's
-/// policy/risk classifier (`policy::risk::TOOLCHAIN_CRITICAL_PACKAGES`)
-/// can't read this file itself (pure command-line classification, no
-/// session access — see that constant's doc comment), so it hardcodes the
-/// one seeded essential package's name instead; this field is what the
-/// handler itself uses to decide whether a removal is *allowed* to
-/// proceed at all as a "just do it" versus something worth a stronger
-/// warning in its own output, independent of the separate policy-level
-/// approval gate.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct MockPackage {
     pub name: String,
@@ -35,7 +14,7 @@ pub struct MockPackage {
 
 #[derive(Debug, Deserialize)]
 struct MockPackageDbFile {
-    #[allow(dead_code)] // read for validation only; not consulted at runtime
+    #[allow(dead_code)]
     schema_version: String,
     packages: Vec<MockPackage>,
 }

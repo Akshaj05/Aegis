@@ -1,36 +1,5 @@
-//! Computes what a simulation pass changed, per §22.3. Because the
-//! transient layer `S` starts empty and every write during simulation
-//! lands only in `S` (§22.2), "diff `S` against empty" reduces to: walk
-//! every entry that now exists in `S`, and classify each one by checking
-//! whether the same relative path already existed in a lower layer.
-//!
-//! **Honest scope for this pass**: `handlers/mod.rs`'s command set (`pwd,
-//! cd, mkdir, touch, ls, cat, echo, rm`) never changes permissions/
-//! ownership or creates symlinks — so `permission_changes`,
-//! `ownership_changes`, and `symlink_changes` (§22.3's other fields) are
-//! structurally always empty right now, not silently unimplemented. They
-//! become real once `chmod`/`chown`/`ln` handlers exist. Process effects
-//! and network are always empty too, per §22.3 itself ("Network
-//! connections: always empty in MVP").
-//!
-//! `rm` deletions are detected by walking the transient layer for
-//! `.wh.<name>` whiteout marker entries (§ `sandbox::worker::resolver`'s
-//! `WHITEOUT_PREFIX`) rather than by diffing directory listings: the
-//! marker *is* the record of a deletion (`LayeredResolver::remove`
-//! creates one exactly when the removed path also exists in a lower
-//! layer), so its presence in `S` is both necessary and sufficient. Each
-//! marker is classified as a file or directory deletion by asking the
-//! lower layers what the removed path used to be — the marker itself
-//! carries no kind information.
-//!
-//! `content_hashes` was added in Build order phase 8: `verification/`
-//! needs a way to tell "content hash differs for a modified file"
-//! (§26.2) apart from "the same path was touched in both predicted and
-//! actual diffs," and the predicted diff's own transient layer is long
-//! gone (discarded via `TransientLayerGuard`) by the time execution's
-//! actual diff exists to compare against — so the hash has to travel
-//! inside the `SimulationDiff` itself rather than be recomputed later
-//! from bytes that no longer exist anywhere.
+// Computes what a simulation pass changed by walking the transient
+// layer and classifying each entry against the layers beneath it.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -44,45 +13,13 @@ use crate::snapshot::backend::MountedView;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SimulationDiff {
-    /// Relative paths new in the transient layer with no counterpart in
-    /// any lower layer.
     pub files_created: Vec<String>,
-    /// Relative paths that existed in a lower layer *and* now also exist
-    /// in the transient layer with different content (i.e. `touch`'s
-    /// copy-up path ran and then something modified the copy — not
-    /// reachable by the current handler set, since none of them modify an
-    /// existing file's content after copy-up, but the classification
-    /// logic is real and ready).
     pub files_modified: Vec<String>,
     pub directories_created: Vec<String>,
-    /// Relative paths removed via `rm` that existed in a lower layer (a
-    /// whiteout marker was recorded for them). Never populated for a path
-    /// that was created and then removed within the same simulation pass
-    /// — that case leaves no trace in `S` at all, which is correct: the
-    /// net effect on the committed layers is nothing.
     pub files_deleted: Vec<String>,
-    /// Same as `files_deleted`, for directories (recursive `rm -r`).
     pub directories_deleted: Vec<String>,
-    /// Sum of file sizes for every entry in `files_deleted`, read from the
-    /// lower layer's `StatInfo::len` at the moment its whiteout is
-    /// classified (the file's bytes are gone from the transient layer by
-    /// definition, so this is the only point they're ever available).
-    /// Not accumulated for `directories_deleted` — same "only files
-    /// contribute a byte count" convention `bytes_affected` already uses
-    /// for created/modified content, and recursing into a deleted
-    /// directory's former lower-layer contents to sum them is scope this
-    /// pass doesn't need.
     pub bytes_deleted: u64,
-    /// Sum of file sizes for every entry in `files_created` +
-    /// `files_modified` — the §20.5 scope-escalation input
-    /// (`policy::risk::SimulationDiffStats`) this feeds once Build order
-    /// phase 6's simulation pass is wired into the Policy Engine's
-    /// post-simulation re-evaluation.
     pub bytes_affected: u64,
-    /// SHA-256 hex digest of the final bytes, keyed by relative path, for
-    /// every entry in `files_created` and `files_modified`. Not populated
-    /// for anything else — hashing an unchanged copy-up is pointless work
-    /// nothing consults.
     pub content_hashes: HashMap<String, String>,
 }
 
@@ -92,11 +29,6 @@ impl SimulationDiff {
     }
 }
 
-/// `transient_layer_path` is the real host directory backing the
-/// transient layer (SafeShell-managed, not user input — same rule as
-/// `fs_abstraction::HostManagedPath`). `lower_view` is the *full* mounted
-/// view including the transient layer at index 0; this function only uses
-/// indices `1..` of it to answer "did this path exist before simulation."
 pub fn compute(
     transient_layer_path: &Path,
     lower_view: &MountedView,
@@ -149,12 +81,7 @@ fn walk(
                     diff.bytes_deleted += info.len;
                     diff.files_deleted.push(deleted_rel);
                 }
-                None => {
-                    // No lower-layer counterpart: `LayeredResolver::remove`
-                    // only ever writes a marker when one exists, so this
-                    // should not happen in practice. Nothing to report
-                    // either way if it does.
-                }
+                None => {}
             }
             continue;
         }
@@ -171,14 +98,7 @@ fn walk(
 
             let existed_before = lower.and_then(|l| l.read_file(&rel_path).ok());
             match existed_before {
-                Some(previous_contents) if previous_contents == bytes => {
-                    // Identical to the lower-layer version: nothing
-                    // actually changed (e.g. `touch` on an existing file
-                    // with the same content, or a copy-up with no
-                    // subsequent modification). Not reported as a change
-                    // at all — an unchanged copy-up is not user-visible
-                    // "modification."
-                }
+                Some(previous_contents) if previous_contents == bytes => {}
                 Some(_) => {
                     diff.content_hashes
                         .insert(rel_path.clone(), hex_sha256(&bytes));

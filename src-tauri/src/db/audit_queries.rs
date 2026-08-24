@@ -1,18 +1,11 @@
-//! The hash-chained `audit_log` table (§35): "each row's `content_hash` is
-//! `sha256(payload_json || previous_row.content_hash)`, forming a hash
-//! chain... lets SafeShell or an external script **detect** retroactive
-//! edits or deletions. It does **not** prevent a local host-root actor
-//! from rewriting the entire chain" — tamper-evident, not tamper-proof,
-//! exactly as scoped there.
+// Hash-chained audit log queries: appends tamper-evident rows to
+// `audit_log` and verifies the integrity of the chain.
 
 use rusqlite::{params, OptionalExtension};
 use sha2::{Digest, Sha256};
 
 use crate::db::Database;
 
-/// The chain's first row has no predecessor; its `content_hash` is
-/// computed against this fixed genesis value rather than `None`/empty
-/// special-casing at every call site.
 const GENESIS_HASH: &str = "";
 
 fn compute_content_hash(payload_json: &str, previous_hash: &str) -> String {
@@ -23,12 +16,6 @@ fn compute_content_hash(payload_json: &str, previous_hash: &str) -> String {
 }
 
 impl Database {
-    /// Appends one audit row, chained to whatever the current last row's
-    /// hash is, and returns the new row's `content_hash`. Per §28's
-    /// "Database write failure" row ("the transaction record or audit
-    /// event cannot be persisted... the transaction does not proceed past
-    /// its current stage"), callers must treat an `Err` here as fatal to
-    /// the transaction's progress, not a best-effort log write.
     pub fn insert_audit_row(
         &self,
         transaction_id: Option<&str>,
@@ -61,12 +48,6 @@ impl Database {
             .optional()
     }
 
-    /// Re-walks the entire chain from genesis, recomputing each row's
-    /// expected `content_hash` from its stored `payload_json` and the
-    /// *previous row's stored* hash, and compares it to what's actually
-    /// stored. Returns `Ok(true)` iff every row matches — the real
-    /// tamper-evidence check §35 describes, not just documentation of the
-    /// intent to have one.
     pub fn verify_audit_chain_integrity(&self) -> rusqlite::Result<bool> {
         let mut stmt = self
             .conn
@@ -133,9 +114,6 @@ mod tests {
         db.insert_audit_row(None, None, "b", "payload_b", "t1")
             .unwrap();
 
-        // Simulate exactly the tampering §35 says this chain can *detect*
-        // (though not prevent, from a host-root actor) — edit a row's
-        // payload directly via SQL, bypassing insert_audit_row.
         db.raw_connection()
             .execute(
                 "UPDATE audit_log SET payload_json = 'tampered' WHERE event_type = 'a'",

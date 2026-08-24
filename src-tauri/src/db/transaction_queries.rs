@@ -1,11 +1,5 @@
-//! Typed queries against `transactions` and `transaction_events` (§34).
-//!
-//! Deliberately takes primitive/string parameters rather than importing
-//! types from `transaction/` — `db/` is the lower layer here (`transaction/`
-//! depends on `db/`, not the reverse), matching how `sandbox/worker/`
-//! depends on `sandbox/syscalls.rs` and not vice versa elsewhere in this
-//! crate. Callers in `transaction/` convert their own enums to the
-//! `&str`/`Option<&str>` this expects.
+// Typed database queries for transactions, transaction events, execution
+// results, verification results, and rollback events.
 
 use rusqlite::params;
 
@@ -71,15 +65,6 @@ impl Database {
             .map(|_| ())
     }
 
-    /// Sets a foreign key into `snapshots(id)` — callers **must** insert
-    /// the corresponding `snapshots` row first, or this fails with a
-    /// `FOREIGN KEY constraint failed` error (found the hard way: an
-    /// earlier version of `transaction::manager::Transaction::record_snapshot_sealed`
-    /// called this before any `snapshots` row existed at all, since
-    /// nothing creates one yet — that's the Snapshot Manager, Build order
-    /// phase 7). Not called anywhere in this codebase yet for exactly
-    /// that reason; kept ready for phase 7 to call once it inserts the
-    /// snapshot row this points at.
     pub fn update_transaction_checkpoint(
         &self,
         id: &str,
@@ -128,8 +113,6 @@ impl Database {
             .map(|_| ())
     }
 
-    /// Ordered by `sequence`, matching §29.2's "monotonic per-transaction
-    /// counter so the frontend can detect dropped or out-of-order events."
     pub fn get_transaction_events(
         &self,
         transaction_id: &str,
@@ -161,10 +144,6 @@ impl Database {
         )
     }
 
-    /// Build order phase 10: `get_transaction_detail`'s (§41) Rust-side
-    /// source. Joins `commands.raw_input` since the IPC contract's detail
-    /// shape includes the original command text and `transactions` itself
-    /// only stores a `command_id` foreign key, not the text.
     pub fn get_transaction_row(&self, id: &str) -> rusqlite::Result<Option<TransactionRow>> {
         self.conn
             .query_row(
@@ -208,10 +187,6 @@ impl Database {
             })
     }
 
-    /// `get_transaction_history`'s (§41) source, newest first. `limit`/
-    /// `offset` implement §30's `page` parameter as a simple offset page —
-    /// the smallest thing that actually paginates, matching this table's
-    /// expected row count (transaction history, not an unbounded log).
     pub fn get_transactions_for_session(
         &self,
         session_id: &str,

@@ -1,10 +1,6 @@
-//! `AiBackend` trait and its implementations (§21.10). Every backend
-//! returns [`AiOutcome`] rather than a bare `Result` — a failed,
-//! timed-out, or unavailable AI call is not an error condition the
-//! pipeline propagates, it's a normal, always-handled outcome (§21.9:
-//! "the transaction proceeds on deterministic policy alone"), so the type
-//! itself has no `Err` variant for callers to be tempted to `?`-propagate
-//! past the point where §21.9's fallback is supposed to happen.
+// Defines the AiBackend trait and its NullBackend, RemoteBackend, and
+// OllamaBackend implementations for sending commands to an AI planner
+// and validating whatever response comes back.
 
 use std::time::Duration;
 
@@ -14,13 +10,6 @@ use crate::ai::validation;
 #[derive(Debug, Clone, PartialEq)]
 pub enum AiOutcome {
     Analyzed(AiPlan),
-    /// §21.9: "the `ai_skipped` flag is set with a reason." Timeout,
-    /// transport failure, schema-validation failure, and "AI disabled"
-    /// all land here — the pipeline treats every one of them identically,
-    /// which is the whole point of collapsing them into one variant
-    /// rather than a backend-specific error enum callers would need to
-    /// match on to decide whether to fall back (they never need to
-    /// decide; falling back is the only behavior that exists).
     Skipped {
         reason: String,
     },
@@ -31,9 +20,6 @@ pub trait AiBackend {
     fn analyze(&self, request: &AiRequest) -> AiOutcome;
 }
 
-/// §21.10: "`NullBackend` is a first-class supported configuration:
-/// SafeShell is fully functional, including all security properties,
-/// with the AI disabled entirely."
 pub struct NullBackend;
 
 impl AiBackend for NullBackend {
@@ -56,24 +42,6 @@ enum TransportError {
     Other(String),
 }
 
-/// §21.10's MVP default: a remote HTTP endpoint returning §21.6's JSON
-/// shape directly in the response body. Deliberately vendor-agnostic —
-/// the architecture specifies "remote API" but no particular vendor
-/// contract, and hardcoding one specific provider's request/response
-/// envelope here would be a claim this document never makes. Point
-/// `endpoint` at whatever adapter translates to/from a specific vendor's
-/// API; this type's job is exactly the two things §21 actually specifies:
-/// a hard timeout (§21.9) and mandatory validation of whatever comes back
-/// (§21.7) before it's ever treated as real.
-///
-/// **Unverified against a real model in this dev environment**: no API
-/// key is configured here, and this project makes no outbound call to a
-/// real AI provider as part of its own test suite. What *is* real and
-/// tested (`tests/ai_schema_validation_tests` and this module's own unit
-/// tests) is the HTTP/timeout/parse-failure machinery itself, exercised
-/// against a local, in-process HTTP server the tests spin up — the exact
-/// same code path a real endpoint would go through, just pointed at
-/// `127.0.0.1` instead of a real host.
 pub struct RemoteBackend {
     endpoint: String,
     api_key: Option<String>,
@@ -81,7 +49,6 @@ pub struct RemoteBackend {
 }
 
 impl RemoteBackend {
-    /// §21.9: "Hard 2.5 s default deadline."
     const DEFAULT_TIMEOUT: Duration = Duration::from_millis(2500);
 
     pub fn new(endpoint: impl Into<String>) -> Self {
@@ -151,35 +118,6 @@ impl AiBackend for RemoteBackend {
     }
 }
 
-/// §21.10's "local... model" deployment option, spoken as Ollama's actual
-/// `/api/generate` contract — unlike [`RemoteBackend`], whose whole point
-/// is staying vendor-agnostic by expecting the endpoint to already speak
-/// §21.6's JSON shape directly. A real Ollama server doesn't: it wants
-/// `{model, prompt, stream, format}` and hands back the model's raw text
-/// wrapped in its own `{"response": "...", ...}` envelope. This backend's
-/// only two jobs are building the prompt that asks the model for exactly
-/// §21.6's schema (closed enum values spelled out, since an LLM has no
-/// other way to know them) and unwrapping that envelope — the extracted
-/// text then goes through the **exact same** [`validation::validate`]
-/// [`RemoteBackend`] uses. Nothing about §21.7's "discarded wholesale,
-/// never partially salvaged, adversarial output cannot alter any
-/// decision" changes just because the source is a local model instead of
-/// a hosted one — a compromised or hallucinating local model is exactly
-/// as untrusted as a compromised remote one, and both are `AiBackend`s
-/// whose output the deterministic Policy Engine never depends on (§21.7,
-/// `tests/ai_schema_validation_tests`).
-///
-/// **Default timeout is 30s, not §21.9's 2.5s.** That figure is written
-/// with a fast hosted API's round trip in mind and §21.9 itself calls it
-/// "default... configurable," not a fixed constant — a local model doing
-/// CPU-bound token generation for a ~170-token structured JSON response
-/// routinely takes several seconds even once loaded (measured ~9s for a
-/// 3B model against a real local server during development), so reusing
-/// `RemoteBackend`'s figure here would mean every real call times out and
-/// the backend never actually returns an analysis in practice, which
-/// defeats the point of supporting it at all. Still fully overridable via
-/// [`with_timeout`](Self::with_timeout) — `main.rs` exposes
-/// `SAFESHELL_OLLAMA_TIMEOUT_MS` for tuning to the host's actual hardware.
 pub struct OllamaBackend {
     endpoint: String,
     model: String,
@@ -213,10 +151,6 @@ impl OllamaBackend {
             model: &self.model,
             prompt,
             stream: false,
-            // Ollama-level guarantee that the model emits syntactically
-            // valid JSON — it says nothing about matching §21.6's
-            // *specific* schema, which is still `validation::validate`'s
-            // job below, exactly as with any other backend's output.
             format: "json",
         };
 
@@ -253,15 +187,6 @@ struct OllamaGenerateResponse {
     response: String,
 }
 
-/// Builds the prompt sent as Ollama's `prompt` field: the command and
-/// deterministic policy context §21.1 says the AI receives, plus §21.6's
-/// schema spelled out field-by-field with every closed enum's exact
-/// snake_case values (an LLM has no other way to learn a taxonomy this
-/// codebase enforces at the type level) and an explicit "JSON only, no
-/// prose" instruction. Free-standing and unit-tested on its own — the
-/// wording matters (a vague prompt reliably produces output
-/// `validation::validate` rejects), so it's worth being able to assert on
-/// without a real model or network call.
 fn build_prompt(request: &AiRequest) -> String {
     format!(
         r#"You are the advisory AI planner for SafeShell, a transactional shell sandbox. You analyze a command that a deterministic Policy Engine has already classified; your output is advisory only and never changes what is allowed to run. Respond with a single JSON object and nothing else — no markdown, no code fences, no commentary before or after it.
@@ -374,17 +299,13 @@ mod tests {
         }"#
     }
 
-    /// Spins up a real, in-process TCP server on `127.0.0.1` that reads
-    /// exactly one HTTP request and responds with `body` verbatim after
-    /// waiting `delay`. No mocking of `RemoteBackend` or `ureq` — the
-    /// backend under test makes a real HTTP request over a real socket.
     fn serve_once(body: &'static str, delay: Duration) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf); // discard the request itself
+            let _ = stream.read(&mut buf);
             thread::sleep(delay);
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -396,10 +317,6 @@ mod tests {
         format!("http://{addr}")
     }
 
-    /// Same as [`serve_once`] but for a body assembled at test-run time
-    /// (e.g. via `serde_json::json!`) rather than a `&'static str`
-    /// literal — leaks it to get the `'static` lifetime the spawned
-    /// thread needs, which is fine for a short-lived test process.
     fn serve_once_leaked(body: String, delay: Duration) -> String {
         serve_once(Box::leak(body.into_boxed_str()), delay)
     }
@@ -447,8 +364,6 @@ mod tests {
 
     #[test]
     fn remote_backend_skips_when_nothing_is_listening_at_all() {
-        // A real, guaranteed-closed port: bind then immediately drop the
-        // listener, so the address is real but refuses the connection.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
@@ -522,11 +437,6 @@ mod tests {
 
     #[test]
     fn ollama_backend_default_timeout_tolerates_slow_local_generation() {
-        // Regression guard: a real local model generating a ~170-token
-        // structured response routinely takes several seconds (measured
-        // ~9s against a real Ollama server during development) — the
-        // default must comfortably exceed that, not `RemoteBackend`'s
-        // 2.5s figure written for a fast hosted API's round trip.
         let endpoint = serve_once_leaked(
             ollama_envelope(valid_plan_json()),
             Duration::from_millis(800),

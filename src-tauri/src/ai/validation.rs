@@ -1,17 +1,9 @@
-//! §21.7's deterministic validation of AI output: "parse or schema
-//! failure means the output is discarded entirely, not partially
-//! salvaged." [`validate`] is the single entry point every `AiBackend`
-//! response must go through before anything downstream (persistence,
-//! divergence detection, display) ever sees an [`AiPlan`] — there is no
-//! other way to obtain a validated one from raw text in this crate.
+// Validates raw AI response text into a trusted AiPlan: JSON parsing,
+// enum-casing normalization, schema-version check, and confidence
+// clamping. Malformed or unsupported responses are discarded entirely.
 
 use crate::ai::schema::AiPlan;
 
-/// The only schema version this build understands. §21.7 doesn't say
-/// what to do with a *future* schema version, but accepting one this
-/// code was never validated against would mean trusting fields whose
-/// meaning might have changed — treated the same as any other validation
-/// failure: discarded, `ai_skipped` set, deterministic policy governs.
 const SUPPORTED_SCHEMA_VERSION: &str = "1.0";
 
 #[derive(Debug, thiserror::Error)]
@@ -24,18 +16,6 @@ pub enum AiValidationError {
     UnsupportedSchemaVersion { got: String },
 }
 
-/// Local models in particular (see `ai::backend::OllamaBackend`'s doc
-/// comment) don't reliably follow a prompt's instruction to use exact
-/// lowercase enum values — `llama3.2` has been observed emitting
-/// `"risk_level": "High"` for a prompt that spells out `"high"` in every
-/// closed-taxonomy list it's given. Lowercasing these three known
-/// closed-enum string fields before deserializing is a pure formatting
-/// normalization, not a semantic salvage: every `snake_case`-renamed
-/// enum in `ai::schema` is case-sensitive only because `serde` compares
-/// bytes, not because case carries meaning, and a value that still isn't
-/// one of the closed set once lowercased fails to parse exactly as
-/// before — §21.7's "discarded entirely, never partially salvaged" is
-/// unchanged for anything that isn't purely a casing artifact.
 fn lowercase_known_enum_fields(value: &mut serde_json::Value) {
     let Some(obj) = value.as_object_mut() else {
         return;
@@ -52,12 +32,6 @@ fn lowercase_known_enum_fields(value: &mut serde_json::Value) {
     }
 }
 
-/// Parses and validates raw AI response text end to end. Confidence is
-/// clamped into `[0.0, 1.0]` per §21.7 ("numeric fields are
-/// range-clamped") rather than rejected outright — an out-of-range
-/// confidence is a quality defect in the response, not evidence the rest
-/// of the structured content is untrustworthy the way a schema mismatch
-/// would be.
 pub fn validate(raw: &str) -> Result<AiPlan, AiValidationError> {
     let mut value: serde_json::Value = serde_json::from_str(raw)?;
     lowercase_known_enum_fields(&mut value);
