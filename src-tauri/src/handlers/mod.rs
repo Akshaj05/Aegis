@@ -51,6 +51,7 @@
 mod coreutils_proc;
 mod fs_ext;
 mod info;
+mod pkg;
 mod text_filters;
 
 use crate::fs_abstraction::SandboxPath;
@@ -126,6 +127,9 @@ fn dispatch_command(
         "chown" => fs_ext::cmd_chown(session, resolver, args),
         "find" => fs_ext::cmd_find(session, resolver, args),
         "du" => fs_ext::cmd_du(session, resolver, args),
+        "truncate" => fs_ext::cmd_truncate(session, resolver, args),
+        "shred" => fs_ext::cmd_shred(session, resolver, args),
+        "safeshell-pkg" => pkg::cmd_safeshell_pkg(session, args),
         "df" => fs_ext::cmd_df(resolver),
         "wc" => text_filters::cmd_wc(session, resolver, args),
         "sort" => text_filters::cmd_sort(session, resolver, args),

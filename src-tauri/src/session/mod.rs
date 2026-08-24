@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use ulid::Ulid;
 
 use crate::fs_abstraction::SandboxPath;
+use crate::mock_packages::MockPackage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SessionId(Ulid);
@@ -46,6 +47,15 @@ pub struct TerminalSession {
     env: HashMap<String, String>,
     history: Vec<String>,
     pub last_exit_status: i32,
+    /// The session's mock package list — `handlers::pkg`'s `safeshell-pkg`
+    /// state. Seeded once at session creation from
+    /// `simulated-root-image/mock-package-db.json`
+    /// (`orchestrator::create_session`), then mutated only by real
+    /// execution, never by simulation — `orchestrator::submit_command`
+    /// clones the whole `TerminalSession` for its simulation pass (see
+    /// that module's doc comment on why `cd`'s `cwd` mutation needed the
+    /// same treatment), so this field inherits that isolation for free.
+    pub packages: Vec<MockPackage>,
 }
 
 impl TerminalSession {
@@ -69,6 +79,7 @@ impl TerminalSession {
             env,
             history: Vec::new(),
             last_exit_status: 0,
+            packages: Vec::new(),
         }
     }
 

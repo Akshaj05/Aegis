@@ -17,6 +17,7 @@
 
 pub mod fs_abstraction;
 pub mod handlers;
+pub mod mock_packages;
 pub mod parser;
 pub mod session;
 

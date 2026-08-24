@@ -35,12 +35,21 @@ const TOP_LEVEL_SYSTEM_DIRS: &[&str] = &["etc", "home", "var", "tmp", "opt", "us
 const ENVIRONMENT_CRITICAL_DIRS: &[&str] = &["etc"];
 
 /// §20.4's illustrative "toolchain-critical" package set for mock package
-/// removal risk escalation. `safeshell-pkg` itself doesn't have a handler
-/// yet (Build order phase 1 only implemented the seven commands listed in
-/// `handlers/mod.rs`'s module doc), so this list has no real package
-/// database to check against — it's a placeholder shape for when one
-/// exists, not real data.
-const TOOLCHAIN_CRITICAL_PACKAGES: &[&str] = &["core-utils", "bash-compat"];
+/// removal risk escalation. `core-utils`/`bash-compat` are this module's
+/// own original placeholder names (kept so the existing risk-classifier
+/// unit tests and the "must not be denied" corpus, which reference them
+/// directly, keep meaning what they always meant); `safeshell-toolchain`
+/// is the real `essential: true` entry in the now-real
+/// `simulated-root-image/mock-package-db.json` seed data that
+/// `handlers::pkg`'s handler actually reads. Still a hardcoded list, not
+/// a live lookup against that file — `classify` is a pure function of
+/// the command line alone (no session/filesystem access, same posture as
+/// `mv`'s clobber detection below), so it can't ask the real package DB
+/// whether an arbitrary name is essential; a session whose package list
+/// diverges from this hardcoded set (e.g. after an `install`) won't have
+/// its removal risk sharpened here. A known, pre-existing limitation of
+/// this static-analysis approach, not something newly introduced.
+const TOOLCHAIN_CRITICAL_PACKAGES: &[&str] = &["core-utils", "bash-compat", "safeshell-toolchain"];
 
 /// A path argument's structural properties, relative to the reasoning
 /// §20.4 needs: is it (conceptually) the sandbox root or a top-level
@@ -119,6 +128,29 @@ fn mode_or_owner_command_targets(args: &[crate::parser::Arg]) -> impl Iterator<I
     non_flag_args(args).skip(1)
 }
 
+/// Whether a `chmod` mode argument would grant "other" (world) write
+/// access. Structural, conservative approximation only — the same
+/// posture `mode_or_owner_command_targets`'s own doc comment already
+/// takes, not a full POSIX mode grammar: recognizes plain octal modes
+/// (`777`, `666`, `0777`, ...; the "other" digit is always last, and bit
+/// `2` of that digit is write) and the common symbolic spellings
+/// (`o+w`, `a+w`, `ugo+w`, bare `+w`). A mode this doesn't recognize is
+/// treated as *not* world-writable rather than guessed at — silently
+/// under-flagging an exotic spelling is a smaller problem than crying
+/// wolf on ordinary modes this function doesn't understand.
+fn chmod_mode_is_world_writable(mode: &str) -> bool {
+    if !mode.is_empty() && mode.chars().all(|c| c.is_ascii_digit()) {
+        return mode
+            .chars()
+            .next_back()
+            .and_then(|c| c.to_digit(8))
+            .is_some_and(|other| other & 0b010 != 0);
+    }
+    ["o+w", "a+w", "ugo+w", "+w"]
+        .iter()
+        .any(|pattern| mode.contains(pattern))
+}
+
 /// One risk rule's result: a level plus the human-readable reason that
 /// justified it (feeds `PolicyDecision.reasons`, alongside the
 /// deterministic reason codes DENY rules use — risk rules don't have
@@ -183,6 +215,39 @@ pub fn classify(cmd: &ParsedCommand, divergence: Option<&str>) -> Option<RiskFin
                 });
             }
         }
+        // Non-recursive `chmod` making a target world-writable. Previously
+        // only `-R` chmod carried any risk at all — a plain `chmod 777
+        // secret.txt` classified as Low, which is wrong regardless of
+        // recursion: granting world-write on even one file is a real
+        // exposure. Scoped to `!has_short_flag(.., 'R')` so this never
+        // fires alongside (or instead of) the recursive arm above — the
+        // two are mutually exclusive by construction, not by match order.
+        "chmod" if !has_short_flag(&cmd.args, 'R') => {
+            let targets: Vec<&str> = mode_or_owner_command_targets(&cmd.args).collect();
+            if let (Some(mode), false) = (non_flag_args(&cmd.args).next(), targets.is_empty()) {
+                if chmod_mode_is_world_writable(mode) {
+                    let critical_target = targets
+                        .iter()
+                        .any(|t| classify_target(t).is_some_and(|s| s.is_root_or_top_level));
+                    findings.push(RiskFinding {
+                        level: if critical_target {
+                            RiskLevel::High
+                        } else {
+                            RiskLevel::Medium
+                        },
+                        reason: format!(
+                            "makes {} world-writable ({mode}){}",
+                            targets.join(", "),
+                            if critical_target {
+                                " — targets the simulated root or a top-level directory"
+                            } else {
+                                ""
+                            }
+                        ),
+                    });
+                }
+            }
+        }
         "chown" if has_short_flag(&cmd.args, 'R') => {
             let targets: Vec<&str> = mode_or_owner_command_targets(&cmd.args).collect();
             if !targets.is_empty() {
@@ -197,6 +262,54 @@ pub fn classify(cmd: &ParsedCommand, divergence: Option<&str>) -> Option<RiskFin
                     },
                     reason: format!(
                         "recursive ownership change on {}{}",
+                        targets.join(", "),
+                        if critical {
+                            " — targets the simulated root or a top-level directory"
+                        } else {
+                            ""
+                        }
+                    ),
+                });
+            }
+        }
+        // `truncate FILE...` discards a file's content beyond (or up to)
+        // whatever `-s SIZE` requests — the same underlying operation as
+        // `>` redirection's own truncation, just spelled as a command
+        // instead of a redirection operator, so it gets the identical
+        // Medium tier for the identical reason (§20.4's `>` rule below).
+        "truncate" => {
+            let targets: Vec<&str> = non_flag_args(&cmd.args).collect();
+            if !targets.is_empty() {
+                findings.push(RiskFinding {
+                    level: RiskLevel::Medium,
+                    reason: format!(
+                        "truncates {} — may discard file content",
+                        targets.join(", ")
+                    ),
+                });
+            }
+        }
+        // `shred` exists to destroy content irrecoverably by intent — GNU
+        // shred's whole purpose, unlike `rm`, is overwriting data so it
+        // can't be recovered. That's a stronger claim than a plain
+        // delete, so it's High unconditionally (never Low even for one
+        // ordinary file), Critical if it targets the simulated root or a
+        // top-level system directory — the same scope-based escalation
+        // `rm -r`/`chmod -R`/`chown -R` already use.
+        "shred" => {
+            let targets: Vec<&str> = non_flag_args(&cmd.args).collect();
+            if !targets.is_empty() {
+                let critical = targets
+                    .iter()
+                    .any(|t| classify_target(t).is_some_and(|s| s.is_root_or_top_level));
+                findings.push(RiskFinding {
+                    level: if critical {
+                        RiskLevel::Critical
+                    } else {
+                        RiskLevel::High
+                    },
+                    reason: format!(
+                        "irrecoverably destroys the content of {}{}",
                         targets.join(", "),
                         if critical {
                             " — targets the simulated root or a top-level directory"
@@ -432,6 +545,74 @@ mod tests {
         let cmd = parse("safeshell-pkg remove some-random-package");
         let finding = classify(&cmd, None).unwrap();
         assert_eq!(finding.level, RiskLevel::Medium);
+    }
+
+    #[test]
+    fn mock_package_removal_of_the_real_seeded_essential_package_is_high() {
+        // `safeshell-toolchain` is the `essential: true` entry in the real
+        // `simulated-root-image/mock-package-db.json` seed data — must hit
+        // the same tier as the module's own placeholder names.
+        let cmd = parse("safeshell-pkg remove safeshell-toolchain");
+        let finding = classify(&cmd, None).unwrap();
+        assert_eq!(finding.level, RiskLevel::High);
+    }
+
+    #[test]
+    fn chmod_777_on_a_single_file_is_medium_not_low() {
+        let cmd = parse("chmod 777 secret.txt");
+        let finding = classify(&cmd, None).unwrap();
+        assert_eq!(finding.level, RiskLevel::Medium);
+    }
+
+    #[test]
+    fn chmod_777_on_a_top_level_dir_without_recursion_is_high() {
+        let cmd = parse("chmod 777 /etc");
+        let finding = classify(&cmd, None).unwrap();
+        assert_eq!(finding.level, RiskLevel::High);
+    }
+
+    #[test]
+    fn chmod_symbolic_world_write_is_flagged_the_same_as_octal() {
+        let cmd = parse("chmod o+w secret.txt");
+        let finding = classify(&cmd, None).unwrap();
+        assert_eq!(finding.level, RiskLevel::Medium);
+    }
+
+    #[test]
+    fn chmod_644_is_not_flagged_at_all() {
+        let cmd = parse("chmod 644 ordinary.txt");
+        assert!(classify(&cmd, None).is_none());
+    }
+
+    #[test]
+    fn chmod_recursive_777_still_uses_the_recursive_rule_not_the_new_one() {
+        // Guards against the two new/old chmod arms double-firing or
+        // fighting over the same command.
+        let cmd = parse("chmod -R 777 /project");
+        let finding = classify(&cmd, None).unwrap();
+        assert_eq!(finding.level, RiskLevel::High);
+        assert!(finding.reason.contains("recursive"));
+    }
+
+    #[test]
+    fn truncate_a_file_is_medium() {
+        let cmd = parse("truncate -s 0 important.log");
+        let finding = classify(&cmd, None).unwrap();
+        assert_eq!(finding.level, RiskLevel::Medium);
+    }
+
+    #[test]
+    fn shred_an_ordinary_file_is_high() {
+        let cmd = parse("shred secret.txt");
+        let finding = classify(&cmd, None).unwrap();
+        assert_eq!(finding.level, RiskLevel::High);
+    }
+
+    #[test]
+    fn shred_a_top_level_dir_is_critical() {
+        let cmd = parse("shred /etc");
+        let finding = classify(&cmd, None).unwrap();
+        assert_eq!(finding.level, RiskLevel::Critical);
     }
 
     #[test]

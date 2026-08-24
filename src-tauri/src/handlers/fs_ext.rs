@@ -1,6 +1,6 @@
 //! Filesystem-structural commands (`rmdir`, `cp`, `mv`, `chmod`, `chown`,
-//! `find`, `du`, `df`) that need real path traversal/mutation rather than
-//! pure byte transformation.
+//! `find`, `du`, `df`, `truncate`, `shred`) that need real path
+//! traversal/mutation rather than pure byte transformation.
 //!
 //! These **cannot** be delegated to uutils' own `uu_cp`/`uu_mv`/etc. crates
 //! — those call `std::fs`/libc directly against real OS paths, with no way
@@ -661,6 +661,130 @@ pub fn cmd_df(resolver: &LayeredResolver) -> CommandResult {
     CommandResult::ok(stdout)
 }
 
+/// `truncate -s SIZE FILE...` — resizes a file to exactly `SIZE` bytes,
+/// zero-padding if growing, discarding trailing content if shrinking
+/// (real `truncate`'s core behavior; `+`/`-`/`%`-relative size
+/// adjustments and `-c`/`--no-create` are not implemented — a documented
+/// subset, same posture as this module's other partial commands). A
+/// target that doesn't exist yet is created (matching real `truncate`'s
+/// default, which is *not* `-c`).
+pub fn cmd_truncate(
+    session: &TerminalSession,
+    resolver: &LayeredResolver,
+    args: &[Arg],
+) -> CommandResult {
+    let items: Vec<&str> = args.iter().map(Arg::as_str).collect();
+    let mut size: Option<u64> = None;
+    let mut targets: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < items.len() {
+        if items[i] == "-s" {
+            i += 1;
+            if let Some(raw) = items.get(i) {
+                size = raw.parse::<u64>().ok();
+            }
+        } else if let Some(rest) = items[i].strip_prefix("-s") {
+            if !rest.is_empty() {
+                size = rest.parse::<u64>().ok();
+            }
+        } else if !items[i].starts_with('-') {
+            targets.push(items[i]);
+        }
+        i += 1;
+    }
+    let Some(size) = size else {
+        return CommandResult::error("truncate: you must specify a size with -s\n", 1);
+    };
+    if targets.is_empty() {
+        return CommandResult::error("truncate: missing file operand\n", 1);
+    }
+
+    let mut stderr = String::new();
+    let mut exit_code = 0;
+    for raw in targets {
+        let target = match resolve_arg(session, raw) {
+            Ok(p) => p,
+            Err(e) => {
+                stderr.push_str(&format!("truncate: {e}\n"));
+                exit_code = 1;
+                continue;
+            }
+        };
+        let mut contents = resolver.read_file(target.as_str()).unwrap_or_default();
+        contents.resize(size as usize, 0);
+        if let Err(e) = resolver.write_file(target.as_str(), &contents) {
+            stderr.push_str(&format!("truncate: cannot truncate '{raw}': {e}\n"));
+            exit_code = 1;
+        }
+    }
+
+    CommandResult {
+        stdout: String::new(),
+        stderr,
+        exit_code,
+    }
+}
+
+/// `shred [-u] FILE...` — overwrites a file's existing content in place
+/// (one pass of zero bytes; real GNU `shred`'s multiple random-data
+/// passes are not reproduced — the destructive *intent* this command
+/// exists to express, which is what `policy::risk` classifies on, is
+/// fully preserved either way). `-u` additionally removes the file after
+/// overwriting, matching real `shred -u`.
+pub fn cmd_shred(
+    session: &TerminalSession,
+    resolver: &LayeredResolver,
+    args: &[Arg],
+) -> CommandResult {
+    let (flags, targets) = short_flags(args);
+    let unlink = flags.contains(&'u');
+    if targets.is_empty() {
+        return CommandResult::error("shred: missing file operand\n", 1);
+    }
+
+    let mut stderr = String::new();
+    let mut exit_code = 0;
+    for raw in targets {
+        let target = match resolve_arg(session, raw) {
+            Ok(p) => p,
+            Err(e) => {
+                stderr.push_str(&format!("shred: {e}\n"));
+                exit_code = 1;
+                continue;
+            }
+        };
+        let len = match resolver.stat(target.as_str()) {
+            Ok(info) => info.len,
+            Err(e) => {
+                stderr.push_str(&format!("shred: {raw}: {e}\n"));
+                exit_code = 1;
+                continue;
+            }
+        };
+        if let Err(e) = resolver.write_file(target.as_str(), &vec![0u8; len as usize]) {
+            stderr.push_str(&format!("shred: cannot shred '{raw}': {e}\n"));
+            exit_code = 1;
+            continue;
+        }
+        if unlink {
+            let Some(name) = target.file_name() else {
+                continue;
+            };
+            let parent = target.parent().unwrap_or_else(SandboxPath::root);
+            if let Err(e) = resolver.remove(parent.as_str(), name, false) {
+                stderr.push_str(&format!("shred: cannot remove '{raw}': {e}\n"));
+                exit_code = 1;
+            }
+        }
+    }
+
+    CommandResult {
+        stdout: String::new(),
+        stderr,
+        exit_code,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -924,5 +1048,90 @@ mod tests {
         let r = run("df", &[], &mut session, &resolver);
         assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
         assert!(r.stdout.contains("safeshell-sim"));
+    }
+
+    #[test]
+    fn truncate_shrinks_a_file_to_the_requested_size() {
+        let mut session = TerminalSession::new();
+        let (_tmp, resolver) = resolver();
+        dispatch(
+            "echo",
+            &args(&["hello world"]),
+            &[crate::parser::Redirection {
+                kind: crate::parser::RedirectionKind::Truncate,
+                target: "a.txt".to_string(),
+            }],
+            &mut session,
+            &resolver,
+        );
+
+        let r = run("truncate", &["-s", "5", "a.txt"], &mut session, &resolver);
+        assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
+        assert_eq!(
+            run("cat", &["a.txt"], &mut session, &resolver),
+            CommandResult::ok("hello")
+        );
+    }
+
+    #[test]
+    fn truncate_grows_a_file_with_zero_bytes() {
+        let mut session = TerminalSession::new();
+        let (_tmp, resolver) = resolver();
+        run("touch", &["a.txt"], &mut session, &resolver);
+
+        let r = run("truncate", &["-s", "4", "a.txt"], &mut session, &resolver);
+        assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
+        let stat_len = resolver.stat("a.txt").unwrap().len;
+        assert_eq!(stat_len, 4);
+    }
+
+    #[test]
+    fn truncate_without_a_size_is_an_error() {
+        let mut session = TerminalSession::new();
+        let (_tmp, resolver) = resolver();
+        run("touch", &["a.txt"], &mut session, &resolver);
+        let r = run("truncate", &["a.txt"], &mut session, &resolver);
+        assert_eq!(r.exit_code, 1);
+    }
+
+    #[test]
+    fn shred_overwrites_content_but_leaves_the_file_present_by_default() {
+        let mut session = TerminalSession::new();
+        let (_tmp, resolver) = resolver();
+        dispatch(
+            "echo",
+            &args(&["secret data"]),
+            &[crate::parser::Redirection {
+                kind: crate::parser::RedirectionKind::Truncate,
+                target: "a.txt".to_string(),
+            }],
+            &mut session,
+            &resolver,
+        );
+
+        let r = run("shred", &["a.txt"], &mut session, &resolver);
+        assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
+        let contents = resolver.read_file("a.txt").unwrap();
+        assert!(contents.iter().all(|&b| b == 0));
+        assert!(!contents.is_empty());
+    }
+
+    #[test]
+    fn shred_dash_u_removes_the_file_after_overwriting() {
+        let mut session = TerminalSession::new();
+        let (_tmp, resolver) = resolver();
+        run("touch", &["a.txt"], &mut session, &resolver);
+
+        let r = run("shred", &["-u", "a.txt"], &mut session, &resolver);
+        assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
+        assert_eq!(run("cat", &["a.txt"], &mut session, &resolver).exit_code, 1);
+    }
+
+    #[test]
+    fn shred_missing_target_is_an_error() {
+        let mut session = TerminalSession::new();
+        let (_tmp, resolver) = resolver();
+        let r = run("shred", &["missing.txt"], &mut session, &resolver);
+        assert_eq!(r.exit_code, 1);
     }
 }

@@ -41,7 +41,7 @@ commands = [
   "echo", "chmod", "chown", "ln", "head", "tail", "wc",
   "mkfifo", "export", "env", "which", "history",
   "sort", "uniq", "cut", "du", "df", "printenv", "whoami", "id", "uname",
-  "date", "sleep",
+  "date", "sleep", "truncate", "shred",
 ]
 
 [tiers.partially_supported]

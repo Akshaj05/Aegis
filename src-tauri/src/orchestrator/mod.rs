@@ -191,6 +191,12 @@ pub struct AppState {
     /// was always called with `NondeterminismAllowlist::empty()`, never
     /// the real base image manifest.
     pub nondeterminism_allowlist: NondeterminismAllowlist,
+    /// `base_image_path`'s `mock-package-db.json`, loaded once at startup
+    /// — [`create_session`] clones this into every new session's
+    /// `TerminalSession::packages` (`handlers::pkg`'s `safeshell-pkg`
+    /// state). See `mock_packages`'s module doc for why this file was
+    /// real seed data sitting unread until now.
+    pub mock_packages: Vec<crate::mock_packages::MockPackage>,
 }
 
 impl AppState {
@@ -240,6 +246,9 @@ impl AppState {
         let nondeterminism_allowlist =
             NondeterminismAllowlist::load(&base_image_path.join("nondeterministic-paths.toml"))
                 .map_err(|e| OrchestratorError::Io(std::io::Error::other(e.to_string())))?;
+        let mock_packages =
+            crate::mock_packages::load(&base_image_path.join("mock-package-db.json"))
+                .map_err(|e| OrchestratorError::Io(std::io::Error::other(e.to_string())))?;
 
         Ok(AppState {
             db: Mutex::new(db),
@@ -249,6 +258,7 @@ impl AppState {
             sessions: Mutex::new(HashMap::new()),
             data_dir,
             retention_policy: RetentionPolicy::default(),
+            mock_packages,
             base_image_path: base_image_path.to_path_buf(),
             nondeterminism_allowlist,
         })
@@ -445,10 +455,12 @@ pub fn create_session(state: &AppState) -> Result<String, OrchestratorError> {
         checkpoints: Vec::new(),
         active_write,
     };
+    let mut terminal = TerminalSession::new();
+    terminal.packages = state.mock_packages.clone();
     state.sessions.lock().unwrap().insert(
         session_id.clone(),
         SessionRuntime {
-            terminal: TerminalSession::new(),
+            terminal,
             backend,
             simulation_backend_name: backend_name,
             stack,
@@ -1709,6 +1721,241 @@ mod tests {
         let detail = get_transaction_detail(&state, &txn_id).unwrap();
         assert_eq!(detail.final_state.as_deref(), Some("COMMITTED"));
         assert_eq!(output.events.last().unwrap().stdout, "apple\n");
+    }
+
+    #[test]
+    fn chmod_777_on_a_single_file_now_requires_approval_and_commits_on_approve() {
+        // The exact gap a user reported live: `chmod 777 file` used to
+        // sail through as Low risk with no approval pause. Now Medium
+        // (policy::risk's new non-recursive world-writable rule).
+        let (state, _tmp) = test_state();
+        let session_id = create_session(&state).unwrap();
+        let mut sink = CollectingEventSink::default();
+        let mut output = CollectingTerminalOutputSink::default();
+        seed_committed_file(&state, &session_id, "a.txt", b"hello");
+
+        let txn_id = submit_command(
+            &state,
+            &session_id,
+            "chmod 777 a.txt",
+            &mut sink,
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(
+            get_transaction_state(&state, &txn_id).unwrap().as_deref(),
+            Some("WAITING_FOR_APPROVAL")
+        );
+        let detail = get_transaction_detail(&state, &txn_id).unwrap();
+        assert_eq!(detail.policy_risk_level.as_deref(), Some("medium"));
+
+        approve_transaction(&state, &txn_id, &mut sink, &mut output).unwrap();
+        assert_eq!(
+            get_transaction_detail(&state, &txn_id)
+                .unwrap()
+                .final_state
+                .as_deref(),
+            Some("COMMITTED")
+        );
+
+        use std::os::unix::fs::PermissionsExt;
+        let write_layer = state
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&session_id)
+            .unwrap()
+            .stack
+            .active_write
+            .clone();
+        let mode = std::fs::metadata(write_layer.join("a.txt"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o777);
+    }
+
+    #[test]
+    fn chmod_644_on_a_single_file_still_auto_commits_with_no_approval_pause() {
+        // A non-dangerous mode must not regress to requiring approval.
+        let (state, _tmp) = test_state();
+        let session_id = create_session(&state).unwrap();
+        let mut sink = CollectingEventSink::default();
+        let mut output = CollectingTerminalOutputSink::default();
+        seed_committed_file(&state, &session_id, "a.txt", b"hello");
+
+        let txn_id = submit_command(
+            &state,
+            &session_id,
+            "chmod 644 a.txt",
+            &mut sink,
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(
+            get_transaction_detail(&state, &txn_id)
+                .unwrap()
+                .final_state
+                .as_deref(),
+            Some("COMMITTED")
+        );
+    }
+
+    #[test]
+    fn truncate_requires_approval_and_discards_content_on_approve() {
+        let (state, _tmp) = test_state();
+        let session_id = create_session(&state).unwrap();
+        let mut sink = CollectingEventSink::default();
+        let mut output = CollectingTerminalOutputSink::default();
+        seed_committed_file(&state, &session_id, "a.txt", b"hello world");
+
+        let txn_id = submit_command(
+            &state,
+            &session_id,
+            "truncate -s 0 a.txt",
+            &mut sink,
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(
+            get_transaction_state(&state, &txn_id).unwrap().as_deref(),
+            Some("WAITING_FOR_APPROVAL")
+        );
+        approve_transaction(&state, &txn_id, &mut sink, &mut output).unwrap();
+        assert_eq!(
+            get_transaction_detail(&state, &txn_id)
+                .unwrap()
+                .final_state
+                .as_deref(),
+            Some("COMMITTED")
+        );
+
+        let write_layer = state
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&session_id)
+            .unwrap()
+            .stack
+            .active_write
+            .clone();
+        assert_eq!(
+            std::fs::metadata(write_layer.join("a.txt")).unwrap().len(),
+            0
+        );
+    }
+
+    #[test]
+    fn shred_is_high_risk_and_destroys_content_on_approve() {
+        let (state, _tmp) = test_state();
+        let session_id = create_session(&state).unwrap();
+        let mut sink = CollectingEventSink::default();
+        let mut output = CollectingTerminalOutputSink::default();
+        seed_committed_file(&state, &session_id, "secret.txt", b"top secret");
+
+        let txn_id = submit_command(
+            &state,
+            &session_id,
+            "shred secret.txt",
+            &mut sink,
+            &mut output,
+        )
+        .unwrap();
+        let detail = get_transaction_detail(&state, &txn_id).unwrap();
+        assert_eq!(detail.category.as_deref(), Some("dangerous_containable"));
+        assert_eq!(detail.policy_risk_level.as_deref(), Some("high"));
+
+        approve_transaction(&state, &txn_id, &mut sink, &mut output).unwrap();
+        assert_eq!(
+            get_transaction_detail(&state, &txn_id)
+                .unwrap()
+                .final_state
+                .as_deref(),
+            Some("COMMITTED")
+        );
+
+        let write_layer = state
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&session_id)
+            .unwrap()
+            .stack
+            .active_write
+            .clone();
+        let contents = std::fs::read(write_layer.join("secret.txt")).unwrap();
+        assert!(contents.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn safeshell_pkg_remove_of_the_essential_package_is_high_risk_through_the_full_pipeline() {
+        let (state, _tmp) = test_state();
+        let session_id = create_session(&state).unwrap();
+        let mut sink = CollectingEventSink::default();
+        let mut output = CollectingTerminalOutputSink::default();
+
+        // Seeded for real from simulated-root-image/mock-package-db.json
+        // by `create_session` — no manual setup needed.
+        let txn_id = submit_command(
+            &state,
+            &session_id,
+            "safeshell-pkg remove safeshell-toolchain",
+            &mut sink,
+            &mut output,
+        )
+        .unwrap();
+        let detail = get_transaction_detail(&state, &txn_id).unwrap();
+        assert_eq!(detail.policy_risk_level.as_deref(), Some("high"));
+        assert_eq!(
+            get_transaction_state(&state, &txn_id).unwrap().as_deref(),
+            Some("WAITING_FOR_APPROVAL")
+        );
+
+        approve_transaction(&state, &txn_id, &mut sink, &mut output).unwrap();
+        assert_eq!(
+            get_transaction_detail(&state, &txn_id)
+                .unwrap()
+                .final_state
+                .as_deref(),
+            Some("COMMITTED")
+        );
+        assert!(!state
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&session_id)
+            .unwrap()
+            .terminal
+            .packages
+            .iter()
+            .any(|p| p.name == "safeshell-toolchain"));
+    }
+
+    #[test]
+    fn safeshell_pkg_list_is_medium_risk_from_the_partially_supported_divergence_alone() {
+        let (state, _tmp) = test_state();
+        let session_id = create_session(&state).unwrap();
+        let mut sink = CollectingEventSink::default();
+        let mut output = CollectingTerminalOutputSink::default();
+
+        let txn_id = submit_command(
+            &state,
+            &session_id,
+            "safeshell-pkg list",
+            &mut sink,
+            &mut output,
+        )
+        .unwrap();
+        let detail = get_transaction_detail(&state, &txn_id).unwrap();
+        assert_eq!(detail.policy_risk_level.as_deref(), Some("medium"));
+        approve_transaction(&state, &txn_id, &mut sink, &mut output).unwrap();
+        assert!(output
+            .events
+            .last()
+            .unwrap()
+            .stdout
+            .contains("safeshell-toolchain"));
     }
 
     #[test]
