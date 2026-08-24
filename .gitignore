@@ -2,13 +2,6 @@
 # Aegis Project - Git Ignore
 # ================================
 
-# ---------- Claude / Architecture ----------
-CLAUDE.md
-architecture.md
-architecture-diagram.md
-docs/architecture/
-.claude/
-
 # ---------- Environment / Secrets ----------
 .env
 .env.*
