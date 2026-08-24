@@ -61,7 +61,7 @@ use crate::db::Database;
 use crate::executor;
 use crate::parser::{self, ParsedCommand};
 use crate::policy::risk::SimulationDiffStats;
-use crate::policy::{self, Category, PolicyEngine, ReasonCode};
+use crate::policy::{self, Category, PolicyEngine, ReasonCode, Verdict};
 use crate::rollback::{self, RollbackOutcome};
 use crate::sandbox::backend::CapabilityReport;
 use crate::sandbox::preflight::PreflightCapabilityChecker;
@@ -486,7 +486,7 @@ pub fn submit_command(
     sink: &mut dyn EventSink,
     output: &mut dyn TerminalOutputSink,
 ) -> Result<String, OrchestratorError> {
-    let db = state.db.lock().unwrap();
+    let mut db = state.db.lock().unwrap();
     let mut sessions = state.sessions.lock().unwrap();
     let session = sessions
         .get_mut(session_id)
@@ -548,13 +548,47 @@ pub fn submit_command(
         return Ok(txn_id);
     }
 
-    let ai_request = AiRequest {
-        command_text: line.to_string(),
-        category: decision.category.map(category_static_str),
-        risk_level: decision.risk_level,
-        policy_reasons: decision.reasons.clone(),
+    // `allow_or_require_approval` (policy/engine.rs) only ever produces
+    // `Verdict::Allow` paired with `Category::Safe`/`RiskLevel::Low` — it's
+    // the sole place `Verdict::Allow` is constructed for a
+    // Supported/PartiallySupported command. AI output is advisory-only
+    // (§21: never able to widen a decision, lower a risk level, or approve
+    // a Deny) and `ai_outcome` is never read back into policy/verdict logic
+    // anywhere in this pipeline — see `record_ai_analysis_and_enter_simulation`,
+    // which only persists it for display. So a command the deterministic
+    // policy engine has already decided needs no approval gains nothing
+    // from waiting on the real AI call, and skipping it here cannot change
+    // any routing outcome: post-simulation escalation (`apply_post_simulation_escalation`,
+    // called after this regardless) is the only thing that can still move
+    // this transaction to RequireApproval, and it runs identically whether
+    // AI analysis happened or was skipped.
+    let ai_outcome = if decision.verdict == Verdict::Allow {
+        crate::ai::backend::AiOutcome::Skipped {
+            reason: "command structurally cannot require approval (policy: Allow/Safe)"
+                .to_string(),
+        }
+    } else {
+        let ai_request = AiRequest {
+            command_text: line.to_string(),
+            category: decision.category.map(category_static_str),
+            risk_level: decision.risk_level,
+            policy_reasons: decision.reasons.clone(),
+        };
+        // `analyze` is a blocking network round trip (`OllamaBackend`'s
+        // default timeout is 30s; real local generation has been measured
+        // at 9-16s) that touches neither the database nor any session
+        // state. Holding `state.db`'s lock across it — as this used to —
+        // stalls every *other* IPC command that needs the database
+        // (`list_sessions`, `get_transaction_history`,
+        // `get_transaction_detail`, `create_session`, ...) for the AI
+        // call's full duration, for every session in the app, not just
+        // this one's. Dropping it here and re-acquiring right after means
+        // only this session's own pipeline waits on the AI response.
+        drop(db);
+        let outcome = state.ai_backend.analyze(&ai_request);
+        db = state.db.lock().unwrap();
+        outcome
     };
-    let ai_outcome = state.ai_backend.analyze(&ai_request);
     txn.record_ai_analysis_and_enter_simulation(&db, sink, &ai_outcome)?;
 
     // A real bug, found via a live session: `sim_manager::simulate` used
@@ -1355,6 +1389,96 @@ mod tests {
             detail.final_state
         );
         assert_eq!(output.events.len(), 1);
+    }
+
+    #[test]
+    fn a_verdict_allow_command_skips_the_real_ai_call_and_a_verdict_require_approval_command_does_not(
+    ) {
+        use crate::ai::backend::{AiBackend, AiOutcome};
+        use crate::ai::schema::{
+            AiPlan, AiRequest, Intent, PredictedEffects, RecoveryRecommendation, RecoveryStrategy,
+        };
+        use crate::policy::RiskLevel;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        struct CountingBackend {
+            calls: Arc<AtomicUsize>,
+        }
+        impl AiBackend for CountingBackend {
+            fn name(&self) -> &'static str {
+                "CountingBackend"
+            }
+            fn analyze(&self, request: &AiRequest) -> AiOutcome {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                AiOutcome::Analyzed(AiPlan {
+                    schema_version: "1".to_string(),
+                    command: request.command_text.clone(),
+                    intent: Intent::RecursiveDelete,
+                    risk_level: RiskLevel::High,
+                    affected_resources: vec![],
+                    predicted_effects: PredictedEffects {
+                        files_deleted_estimate: 0,
+                        directories_deleted_estimate: 0,
+                        escapes_sandbox: false,
+                    },
+                    preconditions: vec![],
+                    reversible_within_safeshell: true,
+                    recovery_recommendation: RecoveryRecommendation {
+                        strategy: RecoveryStrategy::RestorePreTransactionSnapshot,
+                        description: "rollback".to_string(),
+                    },
+                    external_side_effects: false,
+                    confidence: 0.9,
+                    explanation: "test".to_string(),
+                })
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (state, _tmp) = AppState::for_tests(Box::new(CountingBackend {
+            calls: calls.clone(),
+        }));
+        let session_id = create_session(&state).unwrap();
+        let mut sink = CollectingEventSink::default();
+        let mut output = CollectingTerminalOutputSink::default();
+
+        // Verdict::Allow (Low risk by omission) — the real AI backend must
+        // never be invoked; `submit_command` fabricates `AiOutcome::Skipped`
+        // itself.
+        let allow_txn =
+            submit_command(&state, &session_id, "mkdir newdir", &mut sink, &mut output).unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a structurally-safe command must not wait on the real AI call"
+        );
+        let allow_detail = get_transaction_detail(&state, &allow_txn).unwrap();
+        assert_eq!(allow_detail.ai_skipped, Some(true));
+        assert_eq!(
+            allow_detail.ai_skipped_reason.as_deref(),
+            Some("command structurally cannot require approval (policy: Allow/Safe)")
+        );
+        assert_eq!(allow_detail.final_state.as_deref(), Some("COMMITTED"));
+
+        // Verdict::RequireApproval (`rm -rf` is a HIGH/CRITICAL risk rule
+        // match) — the real AI backend must still be consulted exactly as
+        // before.
+        let approval_txn = submit_command(
+            &state,
+            &session_id,
+            "rm -rf /project",
+            &mut sink,
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a command that can require approval must still get full AI analysis"
+        );
+        let approval_detail = get_transaction_detail(&state, &approval_txn).unwrap();
+        assert_eq!(approval_detail.ai_skipped, Some(false));
     }
 
     #[test]

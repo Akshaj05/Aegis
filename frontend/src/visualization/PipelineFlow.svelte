@@ -250,11 +250,9 @@
 <style>
   .flow-wrap {
     width: 100%;
-    overflow-x: auto;
   }
   svg {
     width: 100%;
-    min-width: 620px;
     height: auto;
     display: block;
   }

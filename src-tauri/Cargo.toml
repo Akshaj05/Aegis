@@ -57,6 +57,16 @@ ureq = { version = "3.4.0", features = ["json"] }
 # `src/` other than `main.rs`/`ipc/`'s Tauri command wiring.
 tauri = { version = "2", features = [] }
 
+# `main.rs::main` loads `src-tauri/.env` (if present) before reading any
+# `SAFESHELL_*` variable. Purely a convenience over exporting the same
+# vars in whichever shell happens to launch the app (`cargo tauri dev`,
+# a desktop launcher, ...) — `build_ai_backend`'s env-var-driven
+# selection logic and its "deployment choice, not a compile-time one"
+# rationale (see that function's doc comment) are unchanged; this only
+# changes where the process reads the vars from. `dotenvy` is a
+# maintained fork of the unmaintained `dotenv` crate.
+dotenvy = "0.15"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

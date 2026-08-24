@@ -80,6 +80,15 @@ fn data_dir() -> PathBuf {
 }
 
 fn main() {
+    // Best-effort: populates `std::env` from `src-tauri/.env` if that file
+    // exists, so `SAFESHELL_OLLAMA_MODEL` and friends survive across
+    // launches without needing to be exported in whatever shell starts the
+    // app. Never overrides a variable already set in the real environment
+    // (`dotenvy::dotenv`'s documented behavior), and does nothing at all
+    // when no `.env` file is present — `build_ai_backend` below falls back
+    // to `NullBackend` exactly as before in that case.
+    let _ = dotenvy::dotenv();
+
     let ai_backend = build_ai_backend();
     // Dev-only resolution: `policies/` and `simulated-root-image/` are
     // siblings of `src-tauri/` in this repository, resolved at compile

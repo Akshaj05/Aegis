@@ -24,6 +24,34 @@ pub enum AiValidationError {
     UnsupportedSchemaVersion { got: String },
 }
 
+/// Local models in particular (see `ai::backend::OllamaBackend`'s doc
+/// comment) don't reliably follow a prompt's instruction to use exact
+/// lowercase enum values — `llama3.2` has been observed emitting
+/// `"risk_level": "High"` for a prompt that spells out `"high"` in every
+/// closed-taxonomy list it's given. Lowercasing these three known
+/// closed-enum string fields before deserializing is a pure formatting
+/// normalization, not a semantic salvage: every `snake_case`-renamed
+/// enum in `ai::schema` is case-sensitive only because `serde` compares
+/// bytes, not because case carries meaning, and a value that still isn't
+/// one of the closed set once lowercased fails to parse exactly as
+/// before — §21.7's "discarded entirely, never partially salvaged" is
+/// unchanged for anything that isn't purely a casing artifact.
+fn lowercase_known_enum_fields(value: &mut serde_json::Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    for key in ["risk_level", "intent"] {
+        if let Some(serde_json::Value::String(s)) = obj.get_mut(key) {
+            *s = s.to_lowercase();
+        }
+    }
+    if let Some(serde_json::Value::Object(recovery)) = obj.get_mut("recovery_recommendation") {
+        if let Some(serde_json::Value::String(s)) = recovery.get_mut("strategy") {
+            *s = s.to_lowercase();
+        }
+    }
+}
+
 /// Parses and validates raw AI response text end to end. Confidence is
 /// clamped into `[0.0, 1.0]` per §21.7 ("numeric fields are
 /// range-clamped") rather than rejected outright — an out-of-range
@@ -31,7 +59,9 @@ pub enum AiValidationError {
 /// of the structured content is untrustworthy the way a schema mismatch
 /// would be.
 pub fn validate(raw: &str) -> Result<AiPlan, AiValidationError> {
-    let mut plan: AiPlan = serde_json::from_str(raw)?;
+    let mut value: serde_json::Value = serde_json::from_str(raw)?;
+    lowercase_known_enum_fields(&mut value);
+    let mut plan: AiPlan = serde_json::from_value(value)?;
 
     if plan.schema_version != SUPPORTED_SCHEMA_VERSION {
         return Err(AiValidationError::UnsupportedSchemaVersion {
@@ -133,6 +163,36 @@ mod tests {
     #[test]
     fn an_unrecognized_enum_value_anywhere_in_the_payload_is_discarded_entirely() {
         let json = valid_json().replace("directory_create", "reformat_the_universe");
+        let result = validate(&json);
+        assert!(matches!(result, Err(AiValidationError::Parse(_))));
+    }
+
+    #[test]
+    fn a_capitalized_risk_level_from_a_local_model_is_normalized_not_discarded() {
+        let json = valid_json().replace("\"risk_level\": \"low\"", "\"risk_level\": \"Low\"");
+        let plan = validate(&json).unwrap();
+        assert_eq!(plan.risk_level, RiskLevel::Low);
+    }
+
+    #[test]
+    fn a_capitalized_intent_and_recovery_strategy_are_normalized_not_discarded() {
+        let json = valid_json()
+            .replace("\"intent\": \"directory_create\"", "\"intent\": \"Directory_Create\"")
+            .replace(
+                "\"strategy\": \"no_recovery_needed\"",
+                "\"strategy\": \"NO_RECOVERY_NEEDED\"",
+            );
+        let plan = validate(&json).unwrap();
+        assert_eq!(plan.intent, Intent::DirectoryCreate);
+        assert_eq!(
+            plan.recovery_recommendation.strategy,
+            RecoveryStrategy::NoRecoveryNeeded
+        );
+    }
+
+    #[test]
+    fn a_genuinely_unrecognized_risk_level_still_fails_even_after_lowercasing() {
+        let json = valid_json().replace("\"risk_level\": \"low\"", "\"risk_level\": \"Extreme\"");
         let result = validate(&json);
         assert!(matches!(result, Err(AiValidationError::Parse(_))));
     }

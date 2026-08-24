@@ -379,10 +379,11 @@
   .side-pane {
     min-width: 0;
     overflow-y: auto;
-    padding: 0.75rem;
+    overflow-x: hidden;
+    padding: 1rem;
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: 1rem;
   }
 
   .stage-card {
@@ -390,12 +391,15 @@
     border: 1px solid #30363d;
     border-radius: 8px;
     padding: 0.75rem 1rem;
+    min-width: 0;
   }
   .stage-card-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 0.4rem;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-bottom: 0.6rem;
   }
   .stage-card h3 {
     margin: 0;
@@ -406,6 +410,7 @@
   }
   .badges {
     display: flex;
+    flex-wrap: wrap;
     gap: 0.4rem;
   }
   .muted {

@@ -130,6 +130,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.5rem;
   }
   h2 {
     margin: 0;
@@ -137,6 +139,7 @@
   }
   .badges {
     display: flex;
+    flex-wrap: wrap;
     gap: 0.4rem;
   }
   .command code {
@@ -168,7 +171,8 @@
     margin: 0;
     padding: 0;
     display: flex;
-    gap: 1.25rem;
+    flex-direction: column;
+    gap: 0.3rem;
     font-size: 0.85rem;
   }
   .paths {
