@@ -52,9 +52,7 @@ Manager** (runs the real handler code against a disposable layer) → **Diff Eng
 Manager** (a 17-state machine) → **Snapshot Manager** → **Secure Executor** → **Verification
 Engine** → **Rollback Engine**. Isolation for real execution is provided by Linux namespaces,
 `openat2`/`RESOLVE_BENEATH` path resolution, OverlayFS-backed layering, seccomp-bpf, Landlock, and
-cgroups v2. Full breakdown, component responsibilities, and the frozen reference snapshot this
-diagram was generated from: **[`docs/CLAUDE.md`](docs/CLAUDE.md)** and
-**[`docs/architecture-diagram.md`](docs/architecture-diagram.md)**.
+cgroups v2. Full breakdown, component responsibilities
 
 ## Key features
 
@@ -78,10 +76,6 @@ cd src-tauri && cargo check          # fast loop
 npm run tauri dev                    # full app, native window
 ```
 
-See [`docs/CLAUDE.md`](docs/CLAUDE.md) for the full working contract and build order, and
-`src-tauri/.env.example` for local AI/Ollama configuration (Aegis runs fully without it — the AI
-layer is optional; only its advisory explanations are unavailable when it's off).
-
 ## Command support
 
 Every command resolves to one of four policy tiers before any handler runs
@@ -95,18 +89,6 @@ Every command resolves to one of four policy tiers before any handler runs
 - **Always denied** — shell invocation (`bash`, `sh`) and anything that would touch the real host
   filesystem or a host process directly.
 
-## Documentation
-
-- **[`docs/CLAUDE.md`](docs/CLAUDE.md)** — the working contract: architecture overview, every
-  non-negotiable invariant, repository layout, build order, and testing requirements.
-- **[`docs/architecture.md`](docs/architecture.md)** — the authoritative design spec.
-- **[`docs/architecture-diagram.md`](docs/architecture-diagram.md)** — the diagram source (Mermaid)
-  behind the architecture image above, plus the ambiguities it had to resolve against the code.
-- **[`docs/threat_model.md`](docs/threat_model.md)**, **[`docs/security_claims.md`](docs/security_claims.md)**
-  — what Aegis defends against, and the canonical wording for what it claims (and explicitly does
-  not claim — no universal safety, no VM-level isolation, no AI-certified safety).
-- **[`docs/benchmarks.md`](docs/benchmarks.md)** — real, measured latency numbers from the test
-  suite for the safe-path and denied-path pipelines.
 
 ## Tech stack
 
