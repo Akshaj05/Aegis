@@ -11,12 +11,11 @@
 
 <section class="panel">
   <header>
-    <span class="icon">ℹ️</span>
-    <h2>Not yet supported</h2>
+    <span class="eyebrow">Not yet supported</span>
   </header>
   <p class="command"><code>{detail.command}</code></p>
   <p class="lead">
-    This command is recognized but not implemented yet in SafeShell
+    This command is recognized but not implemented yet in Aegis
     {#if detail.support_tier}(tier: {detail.support_tier}){/if}. This is not a security
     decision — nothing about this command was found to be unsafe.
   </p>
@@ -24,33 +23,28 @@
 
 <style>
   .panel {
-    background: #161b22;
-    border: 1px solid #30363d;
-    border-radius: 8px;
-    padding: 1rem 1.25rem;
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: 0.6rem;
   }
-  header {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
+  .eyebrow {
+    font-size: 0.7rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-tertiary);
   }
-  h2 {
+  .command {
     margin: 0;
-    font-size: 1rem;
-    color: #c9d1d9;
   }
   .command code {
-    background: #0d1117;
-    padding: 0.2rem 0.5rem;
-    border-radius: 4px;
-    font-size: 0.85rem;
+    font-size: 0.9rem;
+    color: var(--text);
   }
   .lead {
     margin: 0;
-    font-size: 0.85rem;
-    color: #8b949e;
+    font-size: 0.83rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
   }
 </style>

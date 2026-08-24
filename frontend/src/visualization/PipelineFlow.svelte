@@ -15,7 +15,6 @@
   import type { FlowEvent } from "../lib/types";
 
   export let events: FlowEvent[] = [];
-  export let category: string | null = null;
 
   const LABELS = [
     "Parse",
@@ -27,7 +26,7 @@
     "Snapshot",
     "Execute",
     "Verify",
-    "Commit/Rollback",
+    "Commit",
   ];
 
   // §13.2's state machine mapped onto §32's ten fixed nodes. Stages not
@@ -138,37 +137,33 @@
   $: nodes = flow.nodes;
   $: reverse = flow.reverse;
 
-  const RADIUS = 15;
-  const SPACING = 78;
-  const START_X = 40;
-  const Y = 46;
+  const RADIUS = 5;
+  const SPACING = 82;
+  const START_X = 30;
+  const Y = 40;
   $: width = START_X * 2 + SPACING * (LABELS.length - 1);
-  const height = 108;
+  const height = 104;
 
   function nodeX(i: number): number {
     return START_X + i * SPACING;
   }
 
+  // A single calm accent for anything "on" (active/done); status that
+  // needs to stand out as different-in-kind (error, deliberately
+  // stopped) gets its own muted tone instead of a brighter version of
+  // the same one — variance in hue reads as meaning here, not variance
+  // in intensity.
   function toneColor(status: NodeStatus): string {
     switch (status) {
       case "error":
-        return "#f85149";
+        return "var(--danger)";
       case "stopped":
-        return "#8b949e";
+        return "var(--text-tertiary)";
       case "active":
       case "done":
-        switch (category) {
-          case "safe":
-            return "#3fb950";
-          case "dangerous_containable":
-            return "#d29922";
-          case "unsafe_to_contain":
-            return "#f85149";
-          default:
-            return "#58a6ff";
-        }
+        return "var(--accent)";
       default:
-        return "#30363d";
+        return "var(--border-hair-strong)";
     }
   }
 
@@ -183,28 +178,28 @@
   <svg viewBox="0 0 {width} {height}" preserveAspectRatio="xMidYMid meet">
     {#each nodes.slice(0, -1) as _, i}
       <line
-        x1={nodeX(i) + RADIUS}
+        x1={nodeX(i) + RADIUS + 2}
         y1={Y}
-        x2={nodeX(i + 1) - RADIUS}
+        x2={nodeX(i + 1) - RADIUS - 2}
         y2={Y}
-        stroke={connectorActive(i) ? toneColor("done") : "#30363d"}
-        stroke-width="2"
-        class:flowing={i === activeNodeIndex - 1}
+        stroke={connectorActive(i) ? "var(--accent)" : "var(--border-hair-strong)"}
+        stroke-opacity={connectorActive(i) ? 0.55 : 1}
+        stroke-width="1"
       />
     {/each}
 
     {#if reverse}
       <path
-        d="M {nodeX(reverse.from)} {Y + RADIUS + 6} C {nodeX(reverse.from)} {Y + 34}, {nodeX(reverse.to)} {Y + 34}, {nodeX(reverse.to)} {Y + RADIUS + 6}"
+        d="M {nodeX(reverse.from)} {Y + RADIUS + 5} C {nodeX(reverse.from)} {Y + 22}, {nodeX(reverse.to)} {Y + 22}, {nodeX(reverse.to)} {Y + RADIUS + 5}"
         fill="none"
-        stroke={reverse.tone === "error" ? "#f85149" : reverse.tone === "done" ? "#8b949e" : "#f85149"}
-        stroke-width="2"
-        stroke-dasharray="5 4"
+        stroke={reverse.tone === "error" ? "var(--danger)" : reverse.tone === "done" ? "var(--text-tertiary)" : "var(--danger)"}
+        stroke-width="1"
+        stroke-dasharray="3 3"
         class:reverse-flowing={reverse.tone === "active"}
       />
       <text
         x={(nodeX(reverse.from) + nodeX(reverse.to)) / 2}
-        y={Y + 46}
+        y={Y + 32}
         text-anchor="middle"
         class="reverse-label"
       >
@@ -214,31 +209,20 @@
 
     {#each nodes as node, i}
       <g class="node" class:active={node.status === "active"}>
+        {#if node.status === "active"}
+          <circle cx={nodeX(i)} cy={Y} r={RADIUS + 3} fill="none" stroke="var(--accent)" stroke-opacity="0.35" class="pulse-ring" />
+        {/if}
         <circle
           cx={nodeX(i)}
           cy={Y}
           r={RADIUS}
-          fill={node.status === "idle" ? "#0d1117" : toneColor(node.status)}
-          fill-opacity={node.status === "idle" ? 1 : node.status === "active" ? 0.35 : 0.22}
+          fill={node.status === "idle" ? "var(--bg)" : toneColor(node.status)}
           stroke={toneColor(node.status)}
-          stroke-width="2"
+          stroke-width="1"
         />
-        {#if node.status === "done"}
-          <text x={nodeX(i)} y={Y + 5} text-anchor="middle" class="glyph" fill={toneColor(node.status)}>
-            &#10003;
-          </text>
-        {:else if node.status === "error"}
-          <text x={nodeX(i)} y={Y + 5} text-anchor="middle" class="glyph" fill={toneColor(node.status)}>
-            &#10005;
-          </text>
-        {:else if node.status === "stopped"}
-          <text x={nodeX(i)} y={Y + 5} text-anchor="middle" class="glyph" fill={toneColor(node.status)}>
-            &#8722;
-          </text>
-        {/if}
-        <text x={nodeX(i)} y={Y + RADIUS + 16} text-anchor="middle" class="node-label">{node.label}</text>
+        <text x={nodeX(i)} y={Y + RADIUS + 13} text-anchor="middle" class="node-label">{node.label}</text>
         {#if node.durationMs !== null}
-          <text x={nodeX(i)} y={Y - RADIUS - 8} text-anchor="middle" class="duration-label">
+          <text x={nodeX(i)} y={Y - RADIUS - 6} text-anchor="middle" class="duration-label">
             {node.durationMs}ms
           </text>
         {/if}
@@ -257,51 +241,47 @@
     display: block;
   }
   .node-label {
-    font-size: 6.5px;
-    fill: #8b949e;
-    font-family: ui-monospace, monospace;
+    font-size: 8.5px;
+    font-weight: 700;
+    fill: var(--text);
+    font-family: var(--mono);
+    letter-spacing: 0.01em;
   }
   .duration-label {
-    font-size: 6px;
-    fill: #58a6ff;
-    font-family: ui-monospace, monospace;
-  }
-  .glyph {
-    font-size: 12px;
-    font-weight: 700;
+    font-size: 7px;
+    fill: var(--text-tertiary);
+    font-family: var(--mono);
   }
   .reverse-label {
-    font-size: 6px;
-    fill: #f85149;
-    font-family: ui-monospace, monospace;
+    font-size: 5.5px;
+    fill: var(--danger);
+    font-family: var(--mono);
   }
-  .node.active circle {
-    animation: pulse 1.1s ease-in-out infinite;
+  .pulse-ring {
+    animation: pulse-ring 1.6s ease-in-out infinite;
+    transform-origin: center;
+    transform-box: fill-box;
   }
-  @keyframes pulse {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
+  @keyframes pulse-ring {
+    0% {
+      transform: scale(0.85);
       opacity: 0.5;
     }
-  }
-  line.flowing {
-    stroke-dasharray: 4 3;
-    animation: flow-forward 0.6s linear infinite;
-  }
-  @keyframes flow-forward {
-    to {
-      stroke-dashoffset: -7;
+    70% {
+      transform: scale(1.6);
+      opacity: 0;
+    }
+    100% {
+      transform: scale(1.6);
+      opacity: 0;
     }
   }
   path.reverse-flowing {
-    animation: flow-reverse 0.6s linear infinite;
+    animation: flow-reverse 0.8s linear infinite;
   }
   @keyframes flow-reverse {
     to {
-      stroke-dashoffset: 9;
+      stroke-dashoffset: 6;
     }
   }
 </style>

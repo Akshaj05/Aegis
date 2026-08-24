@@ -1,8 +1,8 @@
 {
-  "name": "safeshell-frontend",
+  "name": "aegis-frontend",
   "private": true,
   "version": "0.1.0",
-  "description": "SafeShell Tauri frontend: terminal, approval/DENY panels, live pipeline visualization. See docs/architecture.md §31.",
+  "description": "Aegis Tauri frontend: terminal, approval/DENY panels, live pipeline visualization. See docs/architecture.md §31.",
   "type": "module",
   "scripts": {
     "dev": "vite",

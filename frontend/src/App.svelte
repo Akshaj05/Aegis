@@ -87,7 +87,7 @@
       // picks up the new transaction id the moment its first real event
       // arrives instead.
     } catch (e) {
-      terminalRef.writeSystemLine(String(e), "31");
+      terminalRef.writeSystemLine(String(e), "38;5;174");
       if (String(e).includes("quarantined")) {
         quarantined = true;
       }
@@ -128,7 +128,7 @@
       // paused waiting on the panel to the right.
       terminalRef.writeSystemLine(
         "awaiting approval — see the panel on the right.",
-        "33",
+        "38;5;173",
       );
       return;
     }
@@ -168,7 +168,7 @@
       panelDetail = null;
       panelKind = null;
     } catch (e) {
-      terminalRef.writeSystemLine(String(e), "31");
+      terminalRef.writeSystemLine(String(e), "38;5;174");
     } finally {
       approvalBusy = false;
     }
@@ -181,10 +181,10 @@
       await api.rejectTransaction(activeTransactionId);
       panelDetail = null;
       panelKind = null;
-      terminalRef.writeSystemLine("rejected — no changes were made.", "33");
+      terminalRef.writeSystemLine("rejected — no changes were made.", "38;5;173");
       await refreshHistory();
     } catch (e) {
-      terminalRef.writeSystemLine(String(e), "31");
+      terminalRef.writeSystemLine(String(e), "38;5;174");
     } finally {
       approvalBusy = false;
     }
@@ -215,18 +215,18 @@
       if (outcome.ok) {
         terminalRef.writeSystemLine(
           `restored to checkpoint ${outcome.restored_checkpoint_id ?? "(base)"}.`,
-          "33",
+          "38;5;173",
         );
         await refreshHistory();
         await refreshStorage();
       } else {
         terminalRef.writeSystemLine(
           `nothing to undo: ${outcome.reason ?? "no recoverable checkpoint"}.`,
-          "33",
+          "38;5;173",
         );
       }
     } catch (e) {
-      terminalRef.writeSystemLine(String(e), "31");
+      terminalRef.writeSystemLine(String(e), "38;5;174");
     } finally {
       undoBusy = false;
     }
@@ -297,9 +297,9 @@
     </div>
 
     <div class="side-pane">
-      <section class="stage-card">
-        <div class="stage-card-header">
-          <h3>Pipeline{viewingHistorical ? " (history)" : ""}</h3>
+      <section class="stage-block">
+        <div class="stage-block-header">
+          <h3>Pipeline{viewingHistorical ? " · history" : ""}</h3>
           {#if displayedEvents.length}
             <div class="badges">
               <Badge label={categoryLabel(displayedCategory)} tone={categoryTone(displayedCategory)} />
@@ -310,7 +310,7 @@
           {/if}
         </div>
         {#if displayedEvents.length}
-          <PipelineFlow events={displayedEvents} category={displayedCategory} />
+          <PipelineFlow events={displayedEvents} />
         {:else}
           <p class="muted">Idle — submit a command in the terminal.</p>
         {/if}
@@ -330,15 +330,60 @@
 </div>
 
 <style>
+  /* Design tokens — the single source of truth for the whole interface.
+     Custom properties cascade through the DOM regardless of Svelte's
+     per-component style scoping, so every component below just
+     references var(--...) rather than repeating hex values. Deliberately
+     no Tailwind here: the project has no existing Tailwind setup, and
+     introducing one is unrelated build-tooling churn a palette/spacing
+     pass doesn't need — scoped Svelte <style> already gives the same
+     "modular, component-owned CSS" property Tailwind would. */
+  :global(html) {
+    --bg: #0a0a0b;
+    --bg-hover: #17171a;
+    --bg-inset: #131315;
+
+    --border-hair: rgba(255, 255, 255, 0.07);
+    --border-hair-strong: rgba(255, 255, 255, 0.11);
+
+    --text: #e7e5e1;
+    --text-secondary: #9a9894;
+    --text-tertiary: #6b6966;
+
+    --accent: #d99a6c;
+    --accent-strong: #e8ac7e;
+    --accent-soft: rgba(217, 154, 108, 0.14);
+    --accent-soft-strong: rgba(217, 154, 108, 0.24);
+    --accent-ink: #201409;
+
+    --danger: #c9847a;
+    --danger-soft: rgba(201, 132, 122, 0.14);
+
+    --safe: #8caf90;
+    --safe-soft: rgba(140, 175, 144, 0.13);
+
+    --neutral: #8f8d89;
+    --neutral-soft: rgba(143, 141, 137, 0.11);
+
+    --ai: #a794c7;
+    --ai-soft: rgba(167, 148, 199, 0.12);
+
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+  }
+
   :global(html, body) {
     margin: 0;
     height: 100%;
-    background: #0d1117;
-    color: #c9d1d9;
-    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
   }
   :global(#app) {
     height: 100%;
+  }
+  :global(code, pre) {
+    font-family: var(--mono);
   }
 
   .app {
@@ -348,14 +393,13 @@
   }
 
   .quarantine-banner {
-    background: #3d1a1a;
-    border-bottom: 1px solid #f85149;
-    color: #ffb3ac;
-    padding: 0.5rem 1rem;
+    background: var(--danger-soft);
+    color: var(--danger);
+    padding: 0.55rem 1.25rem;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    font-size: 0.85rem;
+    font-size: 0.82rem;
     gap: 1rem;
   }
   .quarantine-banner .actions {
@@ -364,58 +408,59 @@
     flex-shrink: 0;
   }
   .quarantine-banner button {
-    background: #21262d;
-    color: #c9d1d9;
-    border: 1px solid #f85149;
-    border-radius: 6px;
+    background: transparent;
+    color: var(--text);
+    border: none;
+    border-radius: 5px;
     padding: 0.3rem 0.7rem;
-    font-size: 0.78rem;
+    font-size: 0.76rem;
     cursor: pointer;
+    transition: background-color 0.12s ease;
+  }
+  .quarantine-banner button:hover {
+    background: rgba(255, 255, 255, 0.06);
   }
 
   .main {
     flex: 1;
     display: grid;
-    grid-template-columns: 68% 32%;
+    grid-template-columns: 66% 34%;
     min-height: 0;
   }
 
   .terminal-pane {
     min-width: 0;
-    border-right: 1px solid #30363d;
+    border-right: 1px solid var(--border-hair);
   }
 
   .side-pane {
     min-width: 0;
     overflow-y: auto;
     overflow-x: hidden;
-    padding: 1rem;
+    padding: 1.5rem 1.5rem 1rem;
     display: flex;
     flex-direction: column;
-    gap: 1rem;
+    gap: 1.75rem;
   }
 
-  .stage-card {
-    background: #161b22;
-    border: 1px solid #30363d;
-    border-radius: 8px;
-    padding: 0.75rem 1rem;
+  .stage-block {
     min-width: 0;
   }
-  .stage-card-header {
+  .stage-block-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     flex-wrap: wrap;
     gap: 0.4rem;
-    margin-bottom: 0.6rem;
+    margin-bottom: 0.85rem;
   }
-  .stage-card h3 {
+  .stage-block h3 {
     margin: 0;
-    font-size: 0.78rem;
+    font-size: 0.7rem;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: #8b949e;
+    letter-spacing: 0.08em;
+    color: var(--text);
   }
   .badges {
     display: flex;
@@ -423,8 +468,8 @@
     gap: 0.4rem;
   }
   .muted {
-    color: #8b949e;
+    color: var(--text-tertiary);
     margin: 0;
-    font-size: 0.85rem;
+    font-size: 0.82rem;
   }
 </style>

@@ -10,14 +10,13 @@
 
 <section class="panel">
   <header>
-    <span class="stop">⛔</span>
-    <h2>Denied — containment boundary</h2>
+    <span class="eyebrow">Denied · containment boundary</span>
   </header>
 
   <p class="command"><code>{detail.command}</code></p>
 
   <p class="lead">
-    This is a containment-boundary matter, not a risk judgment. SafeShell does not run this
+    This is a containment-boundary matter, not a risk judgment. Aegis does not run this
     operation in any form — not simulated, not approval-gated, not with a force flag.
   </p>
 
@@ -33,43 +32,41 @@
   {/if}
 
   <p class="footnote">
-    If this targets a host resource, the SafeShell-managed equivalent (if any exists) is under
+    If this targets a host resource, the Aegis-managed equivalent (if any exists) is under
     the simulated environment's own root, not the host path referenced above.
   </p>
 </section>
 
 <style>
+  /* A thin accent edge, not a boxed alert — still unmistakably distinct
+     from ApprovalPanel (which has none at all), without the heavy
+     full-bleed red card. */
   .panel {
-    background: #2d1214;
-    border: 1px solid #f85149;
-    border-radius: 8px;
-    padding: 1rem 1.25rem;
+    border-left: 2px solid var(--danger);
+    padding-left: 1rem;
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
   }
-  header {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
+  .eyebrow {
+    font-size: 0.7rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--danger);
   }
-  .stop {
-    font-size: 1.1rem;
-  }
-  h2 {
+  .command {
     margin: 0;
-    font-size: 1rem;
-    color: #ffb3ac;
   }
   .command code {
-    background: #0d1117;
-    padding: 0.2rem 0.5rem;
-    border-radius: 4px;
-    font-size: 0.85rem;
+    font-size: 0.9rem;
+    color: var(--text);
   }
   .lead {
     margin: 0;
-    font-size: 0.88rem;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
   }
   .reasons {
     display: flex;
@@ -77,21 +74,20 @@
     gap: 0.5rem;
   }
   .reason {
-    background: rgba(0, 0, 0, 0.2);
-    border-radius: 6px;
-    padding: 0.5rem 0.65rem;
+    padding: 0.1rem 0;
   }
   .code {
-    font-size: 0.7rem;
-    color: #f85149;
+    font-size: 0.68rem;
+    color: var(--danger);
   }
   .reason p {
-    margin: 0.25rem 0 0;
-    font-size: 0.85rem;
+    margin: 0.2rem 0 0;
+    font-size: 0.83rem;
+    color: var(--text-secondary);
   }
   .footnote {
     margin: 0;
-    font-size: 0.78rem;
-    color: #d4a5a1;
+    font-size: 0.76rem;
+    color: var(--text-tertiary);
   }
 </style>

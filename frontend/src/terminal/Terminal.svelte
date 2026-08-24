@@ -13,7 +13,7 @@
   import { Terminal as XTerm } from "@xterm/xterm";
   import "@xterm/xterm/css/xterm.css";
 
-  export let prompt = "safeshell> ";
+  export let prompt = "aegis> ";
 
   let container: HTMLDivElement;
   let term: XTerm;
@@ -21,13 +21,21 @@
 
   const dispatch = createEventDispatcher<{ submit: string; interrupt: void }>();
 
+  // 256-color codes chosen to match the app's pastel-terracotta accent
+  // (173) and muted danger (174) tokens (`App.svelte`'s `--accent`/
+  // `--danger`) — xterm's theme is a plain JS object evaluated once, not
+  // living CSS, so it can't reference the CSS custom properties directly;
+  // these are that palette's nearest ANSI-256 equivalents.
+  const PROMPT_COLOR = "38;5;173";
+  const ERROR_COLOR = "38;5;174";
+
   function writePrompt() {
-    term.write(`\r\n\x1b[1;38;5;75m${prompt}\x1b[0m`);
+    term.write(`\r\n\x1b[${PROMPT_COLOR}m${prompt}\x1b[0m`);
   }
 
   /** A one-line system message (parse errors, deny/unsupported echoes) —
-   * `colorCode` is a raw ANSI SGR code, e.g. "31" for red, "33" for
-   * yellow. */
+   * `colorCode` is a raw ANSI SGR code, e.g. "38;5;174" for the muted
+   * danger tone, "38;5;173" for a neutral/notice tone. */
   export function writeSystemLine(text: string, colorCode = "0") {
     term.write(`\r\n\x1b[${colorCode}m${text}\x1b[0m`);
     writePrompt();
@@ -39,7 +47,7 @@
    * if it were real). */
   export function writeOutput(stdout: string, stderr: string) {
     if (stdout) term.write(`\r\n${stdout.replace(/\n/g, "\r\n")}`);
-    if (stderr) term.write(`\r\n\x1b[31m${stderr.replace(/\n/g, "\r\n")}\x1b[0m`);
+    if (stderr) term.write(`\r\n\x1b[${ERROR_COLOR}m${stderr.replace(/\n/g, "\r\n")}\x1b[0m`);
     writePrompt();
   }
 
@@ -49,14 +57,15 @@
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
       fontSize: 14,
       theme: {
-        background: "#0d1117",
-        foreground: "#c9d1d9",
-        cursor: "#58a6ff",
-        selectionBackground: "#264f78",
+        background: "#0a0a0b",
+        foreground: "#e7e5e1",
+        cursor: "#d99a6c",
+        cursorAccent: "#0a0a0b",
+        selectionBackground: "rgba(217, 154, 108, 0.18)",
       },
     });
     term.open(container);
-    term.write("SafeShell — simulate → understand → approve → execute → verify → recover.");
+    term.write("Aegis — simulate → understand → approve → execute → verify → recover.");
     writePrompt();
     term.focus();
 
@@ -99,7 +108,7 @@
   .terminal {
     height: 100%;
     width: 100%;
-    padding: 0.5rem 0.75rem;
+    padding: 0.75rem 1rem;
     box-sizing: border-box;
   }
 

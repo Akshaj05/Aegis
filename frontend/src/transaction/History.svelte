@@ -31,8 +31,8 @@
 <section class="history" class:collapsed>
   <div class="header-row">
     <button class="toggle-header" on:click={() => (collapsed = !collapsed)}>
-      <h3>History ({items.length})</h3>
-      <span class="toggle">{collapsed ? "▸" : "▾"}</span>
+      <span class="chevron" class:collapsed>▾</span>
+      <h3>History <span class="count">{items.length}</span></h3>
     </button>
     <!-- §44 step 4: "Undo Last Transaction." §23.5 is strictly LIFO — there
          is exactly one valid target, computed by the core, which is why
@@ -43,7 +43,7 @@
       on:click={() => dispatch("undo")}
       title="Restore the environment to the state before the most recent committed transaction"
     >
-      Undo Last Transaction
+      Undo last transaction
     </button>
   </div>
   {#if !collapsed}
@@ -68,15 +68,17 @@
 </section>
 
 <style>
+  /* No dividing border — a faint background/foreground tonal shift
+     (barely a shade lighter than the app background) is enough to read
+     as "a different region" without a hard line. */
   .history {
-    border-top: 1px solid #30363d;
-    background: #0d1117;
+    background: var(--bg-inset);
   }
   .header-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0.25rem 1rem;
+    padding: 0.35rem 1.25rem;
   }
   .toggle-header {
     display: flex;
@@ -91,38 +93,50 @@
     font: inherit;
   }
   .undo {
-    background: #21262d;
-    color: #c9d1d9;
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    padding: 0.25rem 0.6rem;
+    background: transparent;
+    color: var(--danger);
+    border: none;
+    border-radius: 5px;
+    padding: 0.3rem 0.6rem;
     font-size: 0.72rem;
     cursor: pointer;
+    transition: background-color 0.12s ease, color 0.12s ease;
   }
   .undo:hover:not(:disabled) {
-    border-color: #58a6ff;
+    background: var(--danger-soft);
+    color: var(--danger);
   }
   .undo:disabled {
-    opacity: 0.6;
+    opacity: 0.5;
     cursor: not-allowed;
   }
   h3 {
     margin: 0;
-    font-size: 0.78rem;
+    font-size: 0.7rem;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: #8b949e;
+    letter-spacing: 0.07em;
+    color: var(--text);
   }
-  .toggle {
-    color: #8b949e;
+  .count {
+    color: var(--text-tertiary);
+    font-weight: 400;
+  }
+  .chevron {
+    color: var(--text-tertiary);
+    font-size: 0.65rem;
+    transition: transform 0.15s ease;
+  }
+  .chevron.collapsed {
+    transform: rotate(-90deg);
   }
   .rows {
     max-height: 9rem;
     overflow-y: auto;
-    padding: 0 0.5rem 0.5rem;
+    padding: 0 0.75rem 0.5rem;
     display: flex;
     flex-direction: column;
-    gap: 0.15rem;
+    gap: 0.1rem;
   }
   .row {
     display: flex;
@@ -132,16 +146,16 @@
     border: none;
     color: inherit;
     text-align: left;
-    padding: 0.3rem 0.5rem;
-    border-radius: 4px;
+    padding: 0.35rem 0.5rem;
+    border-radius: 5px;
     cursor: pointer;
     font-size: 0.8rem;
   }
   .row:hover {
-    background: #161b22;
+    background: var(--bg-hover);
   }
   .cmd {
-    font-family: ui-monospace, monospace;
+    color: var(--text-secondary);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -154,12 +168,12 @@
     flex-shrink: 0;
   }
   .time {
-    color: #8b949e;
-    font-size: 0.72rem;
+    color: var(--text-tertiary);
+    font-size: 0.7rem;
   }
   .empty {
-    color: #8b949e;
+    color: var(--text-tertiary);
     font-size: 0.8rem;
-    padding: 0.25rem 0.5rem;
+    padding: 0.3rem 0.5rem;
   }
 </style>
